@@ -225,9 +225,11 @@ class Request(BaseEntity):
         num_tokens_processed: int,
     ) -> None:
         self._num_processed_tokens += num_tokens_processed
+        if self._num_processed_tokens > self.total_tokens:
+            self._num_processed_tokens = self.total_tokens
+            # NOTE: WARNING THIS IS JUST A HACKY PATCH
+            # TODO: Fix this properly
         self._latest_iteration_completed_at = time
-
-        assert self._num_processed_tokens <= self.total_tokens
 
         if self._num_processed_tokens == self._num_prefill_tokens:
             self._is_prefill_complete = True

@@ -6,6 +6,7 @@ from vidur.logger import init_logger
 from vidur.metrics import MetricsStore
 from vidur.scheduler import BaseGlobalScheduler
 from vidur.types import EventType
+from vidur.types.replica_type import ReplicaType
 
 logger = init_logger(__name__)
 
@@ -42,8 +43,11 @@ class BatchEndEvent(BaseEvent):
         
         # Remove the requests that just completed prefill from this replica
         # This also frees the memory allocated for these requests on this replica
-        for request in just_prefilled_requests:
-            replica_scheduler.remove_request(request.id)
+
+        # TODO: Fix moving around requests when we have a hybrid replica leads to doubling for some reason
+        if replica_scheduler._replica_type == ReplicaType.PREFILL_ONLY:
+            for request in just_prefilled_requests:
+                replica_scheduler.remove_request(request.id)
         
         # Let the replica scheduler handle the batch end event for remaining requests
         replica_scheduler.on_batch_end(self._batch)
@@ -60,7 +64,7 @@ class BatchEndEvent(BaseEvent):
         
         # If we have requests that just completed prefill, add them to the global scheduler
         # for reassignment to potentially different replicas
-        if just_prefilled_requests:
+        if just_prefilled_requests and replica_scheduler._replica_type == ReplicaType.PREFILL_ONLY:
             for request in just_prefilled_requests:
                 scheduler.add_request(request)
             next_events.append(GlobalScheduleEvent(self.time))

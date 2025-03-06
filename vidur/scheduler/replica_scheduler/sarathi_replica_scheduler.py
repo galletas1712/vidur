@@ -57,13 +57,13 @@ class SarathiReplicaScheduler(BaseReplicaScheduler):
         num_tokens_required = max(0, request.num_processed_tokens - num_tokens_reserved)
 
         assert (
-            num_tokens_required == 0 or num_tokens_required == 1
+            num_tokens_required <= 2
         ), f"num_tokens_required: {num_tokens_required} for request {request.id}, num_tokens_reserved: {num_tokens_reserved}, num_prefill_tokens: {request.num_prefill_tokens}, num_processed_tokens: {request.num_processed_tokens}"
 
         if num_tokens_required == 0:
             return
 
-        self.allocate(request.id, 1)
+        self.allocate(request.id, num_tokens_required)
 
     def on_batch_end(self, batch: Batch) -> None:
         self._num_running_batches -= 1

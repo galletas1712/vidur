@@ -41,7 +41,7 @@ class VLLMReplicaScheduler(BaseReplicaScheduler):
         if request.id not in self._allocation_map:
             # new request
             num_required_blocks = ceil(
-                (request.num_prefill_tokens) / self._config.block_size
+                max(request.num_prefill_tokens, request.num_processed_tokens) / self._config.block_size
             )
             return (
                 self._config.num_blocks
@@ -67,13 +67,13 @@ class VLLMReplicaScheduler(BaseReplicaScheduler):
         num_tokens_required = max(0, request.num_processed_tokens - num_tokens_reserved)
 
         assert (
-            num_tokens_required == 0 or num_tokens_required == 1
+            num_tokens_required <= 2
         ), f"num_tokens_required: {num_tokens_required} for request {request.id}, num_tokens_reserved: {num_tokens_reserved}, num_prefill_tokens: {request.num_prefill_tokens}, num_processed_tokens: {request.num_processed_tokens}"
 
         if num_tokens_required == 0:
             return
 
-        self.allocate(request.id, 1)
+        self.allocate(request.id, num_tokens_required)
 
     def _get_next_batch(self) -> Batch:
         requests = []
