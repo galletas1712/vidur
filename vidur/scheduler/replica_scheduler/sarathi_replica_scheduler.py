@@ -20,11 +20,19 @@ class SarathiReplicaScheduler(BaseReplicaScheduler):
             self._config.watermark_blocks_fraction * self._config.num_blocks
         )
 
+    def add_request(self, request: Request) -> None:
+        # If request has already completed prefill (relocated from another replica),
+        # add it to the preempted_requests list instead of request_queue
+        if request.is_prefill_complete:
+            self._preempted_requests.append(request)
+        else:
+            super().add_request(request)
+
     def _can_allocate_request(self, request: Request) -> bool:
         if request.id not in self._allocation_map:
             # new request
             num_required_blocks = ceil(
-                request.num_prefill_tokens / self._config.block_size
+                max(request.num_prefill_tokens, request.num_processed_tokens) / self._config.block_size
             )
             return (
                 self._config.num_blocks
@@ -40,7 +48,7 @@ class SarathiReplicaScheduler(BaseReplicaScheduler):
         if request.id not in self._allocation_map:
             # new request
             num_required_blocks = ceil(
-                request.num_prefill_tokens / self._config.block_size
+                 max(request.num_prefill_tokens, request.num_processed_tokens) / self._config.block_size
             )
             self.allocate(request.id, num_required_blocks)
             return
@@ -50,7 +58,7 @@ class SarathiReplicaScheduler(BaseReplicaScheduler):
 
         assert (
             num_tokens_required == 0 or num_tokens_required == 1
-        ), f"num_tokens_required: {num_tokens_required}"
+        ), f"num_tokens_required: {num_tokens_required} for request {request.id}, num_tokens_reserved: {num_tokens_reserved}, num_prefill_tokens: {request.num_prefill_tokens}, num_processed_tokens: {request.num_processed_tokens}"
 
         if num_tokens_required == 0:
             return
@@ -61,10 +69,19 @@ class SarathiReplicaScheduler(BaseReplicaScheduler):
         self._num_running_batches -= 1
 
         for request in batch.requests:
+            # Skip requests that just completed prefill in a prefill-only replica
+            if request.prefill_completed_at == batch.completed_at and not self._can_handle_decode:
+                # This request will be removed by the batch_end_event handler
+                continue
+
             if request.completed:
-                self.free(request.id)
+                if request.id in self._allocation_map:
+                    self.free(request.id)
             else:
-                self._preempted_requests.append(request)
+                # Only add to preempted_requests if this replica can handle the request's phase
+                if (not request.is_prefill_complete and self._can_handle_prefill) or \
+                    (request.is_prefill_complete and self._can_handle_decode):
+                    self._preempted_requests.append(request)
 
     def _get_request_next_num_tokens(
         self, request: Request, batch_contains_prefill: bool, num_batch_tokens: int

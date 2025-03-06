@@ -19,6 +19,14 @@ class VLLMReplicaScheduler(BaseReplicaScheduler):
         self._watermark_blocks = int(
             self._config.watermark_blocks_fraction * self._config.num_blocks
         )
+        
+    def add_request(self, request: Request) -> None:
+        # If request has already completed prefill (relocated from another replica),
+        # add it to the preempted_requests list instead of request_queue
+        if request.is_prefill_complete:
+            self._preempted_requests.append(request)
+        else:
+            super().add_request(request)
 
     def on_batch_end(self, batch: Batch) -> None:
         self._num_running_batches -= 1
@@ -49,16 +57,18 @@ class VLLMReplicaScheduler(BaseReplicaScheduler):
         if request.id not in self._allocation_map:
             # new request
             num_required_blocks = ceil(
-                (request.num_prefill_tokens) / self._config.block_size
+                 max(request.num_prefill_tokens, request.num_processed_tokens) / self._config.block_size
             )
+            print("Allocating", num_required_blocks, "blocks for request", request.id, "num_prefill_tokens", request.num_prefill_tokens, "num_processed_tokens", request.num_processed_tokens)
             self.allocate(request.id, num_required_blocks)
             return
 
         num_tokens_reserved = self._allocation_map[request.id] * self._config.block_size
         num_tokens_required = max(0, request.num_processed_tokens - num_tokens_reserved)
+
         assert (
             num_tokens_required == 0 or num_tokens_required == 1
-        ), f"num_tokens_required: {num_tokens_required}"
+        ), f"num_tokens_required: {num_tokens_required} for request {request.id}, num_tokens_reserved: {num_tokens_reserved}, num_prefill_tokens: {request.num_prefill_tokens}, num_processed_tokens: {request.num_processed_tokens}"
 
         if num_tokens_required == 0:
             return

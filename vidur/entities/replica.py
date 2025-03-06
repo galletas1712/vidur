@@ -1,8 +1,9 @@
 from math import ceil
 
-from vidur.config import BaseRequestGeneratorConfig, ReplicaConfig
+from vidur.config import BaseRequestGeneratorConfig, BaseReplicaConfig
 from vidur.entities.base_entity import BaseEntity
 from vidur.logger import init_logger
+from vidur.types import ReplicaType
 
 logger = init_logger(__name__)
 
@@ -10,7 +11,7 @@ logger = init_logger(__name__)
 class Replica(BaseEntity):
     def __init__(
         self,
-        replica_config: ReplicaConfig,
+        replica_config: BaseReplicaConfig,
         generator_config: BaseRequestGeneratorConfig,
     ) -> None:
         self._id = Replica.generate_id()
@@ -19,6 +20,7 @@ class Replica(BaseEntity):
         self._model_config = replica_config.model_config
         self._device_config = replica_config.device_config
         self._generator_config = generator_config
+        self._replica_type = replica_config.get_replica_type()
 
         assert (
             self._model_config.num_layers % self._replica_config.num_pipeline_stages
@@ -104,6 +106,20 @@ class Replica(BaseEntity):
     @property
     def per_device_flops(self) -> float:
         return self._device_config.fp16_tflops * 2**40
+    
+    @property
+    def replica_type(self) -> ReplicaType:
+        return self._replica_type
+    
+    @property
+    def can_handle_prefill(self) -> bool:
+        """Whether this replica can handle the prefill phase."""
+        return self._replica_type in [ReplicaType.PREFILL_ONLY, ReplicaType.HYBRID]
+    
+    @property
+    def can_handle_decode(self) -> bool:
+        """Whether this replica can handle the decode phase."""
+        return self._replica_type in [ReplicaType.DECODE_ONLY, ReplicaType.HYBRID]
 
     def to_dict(self) -> dict:
         return {
@@ -117,4 +133,5 @@ class Replica(BaseEntity):
             "vocab_size": self.vocab_size,
             "num_pipeline_stages": self.num_pipeline_stages,
             "num_tensor_parallel_workers": self.num_tensor_parallel_workers,
+            "replica_type": str(self.replica_type),
         }

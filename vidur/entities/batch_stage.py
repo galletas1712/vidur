@@ -122,8 +122,40 @@ class BatchStage(BaseEntity):
         }
 
     def to_chrome_trace(self, time: int) -> dict:
+        # Separate prefill and decode request IDs
+        prefill_request_ids = []
+        decode_request_ids = []
+        
+        # Collect KV cache lengths and total KV cache read
+        kv_cache_lengths = []
+        total_kv_cache_read = 0
+        
+        for request in self._requests:
+            # Determine if this request is in prefill or decode phase
+            if not request.is_prefill_complete:
+                prefill_request_ids.append(request.id)
+            else:
+                decode_request_ids.append(request.id)
+            
+            # Calculate KV cache length (number of processed tokens)
+            kv_length = request.num_processed_tokens
+            kv_cache_lengths.append(kv_length)
+            
+            # Calculate total KV cache read for this request
+            # Each decode token reads the KV cache of all previous tokens
+            if request.num_processed_decode_tokens > 0:
+                # For each decode token, we read the KV cache of all previous tokens
+                # So total read is sum of 1 to (processed_tokens - prefill_tokens)
+                decode_tokens = request.num_processed_decode_tokens
+                prefill_tokens = request.num_processed_prefill_tokens
+                total_read_for_request = prefill_tokens * decode_tokens
+                total_kv_cache_read += total_read_for_request
+        
+        # Create a more informative name that shows prefill and decode batch IDs
+        batch_name = f"P: {prefill_request_ids}, D: {decode_request_ids}"
+        
         return {
-            "name": f"{self.request_ids}",
+            "name": batch_name,
             "ph": "X",
             "ts": (time - self._execution_time) * 1e6,
             "dur": self._execution_time * 1e6,
@@ -134,6 +166,8 @@ class BatchStage(BaseEntity):
                 "batch_size": self.size,
                 "request_ids": self.request_ids,
                 "num_tokens": self._num_tokens,
+                "kv_cache_lengths": kv_cache_lengths,
+                "total_kv_cache_read": total_kv_cache_read,
                 # "requests": [request.to_dict() for request in self._requests],
             },
         }

@@ -3,7 +3,7 @@ import os
 from abc import ABC
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import List, Optional
+from typing import Dict, List, Optional, Union
 
 from vidur.config.base_poly_config import BasePolyConfig
 from vidur.config.device_sku_config import BaseDeviceSKUConfig
@@ -19,6 +19,7 @@ from vidur.types import (
     RequestGeneratorType,
     RequestIntervalGeneratorType,
     RequestLengthGeneratorType,
+    ReplicaType,
 )
 
 logger = init_logger(__name__)
@@ -425,7 +426,8 @@ class MetricsConfig:
 
 
 @dataclass
-class ReplicaConfig:
+class BaseReplicaConfig:
+    """Base class for all replica configurations."""
     model_name: str = field(
         default="meta-llama/Llama-2-7b-hf",
         metadata={"help": "Model name."},
@@ -462,6 +464,42 @@ class ReplicaConfig:
         self.node_config: BaseNodeSKUConfig = BaseNodeSKUConfig.create_from_type_string(
             self.network_device
         )
+    
+    @staticmethod
+    def get_replica_type():
+        """Return the type of replica this config represents."""
+        raise NotImplementedError("Subclasses must implement get_replica_type")
+
+
+@dataclass
+class HybridReplicaConfig(BaseReplicaConfig):
+    """Configuration for hybrid replicas that can handle both prefill and decode phases."""
+    
+    @staticmethod
+    def get_replica_type():
+        return ReplicaType.HYBRID
+
+
+@dataclass
+class PrefillOnlyReplicaConfig(BaseReplicaConfig):
+    """Configuration for replicas that can only handle the prefill phase."""
+    
+    @staticmethod
+    def get_replica_type():
+        return ReplicaType.PREFILL_ONLY
+
+
+@dataclass
+class DecodeOnlyReplicaConfig(BaseReplicaConfig):
+    """Configuration for replicas that can only handle the decode phase."""
+    
+    @staticmethod
+    def get_replica_type():
+        return ReplicaType.DECODE_ONLY
+
+
+# For backward compatibility
+ReplicaConfig = HybridReplicaConfig
 
 
 @dataclass
@@ -608,11 +646,22 @@ class RandomForrestExecutionTimePredictorConfig(BaseExecutionTimePredictorConfig
 
 @dataclass
 class ClusterConfig:
-    num_replicas: int = field(
+    num_prefill_replicas: int = field(
         default=1,
-        metadata={"help": "Number of replicas."},
+        metadata={"help": "Number of prefill-only replicas to create."},
     )
-    replica_config: ReplicaConfig = field(default_factory=ReplicaConfig)
+    num_decode_replicas: int = field(
+        default=1,
+        metadata={"help": "Number of decode-only replicas to create."},
+    )
+    num_hybrid_replicas: int = field(
+        default=0,
+        metadata={"help": "Number of hybrid replicas to create."},
+    )
+    replica_config: BaseReplicaConfig = field(
+        default_factory=HybridReplicaConfig,
+        metadata={"help": "Base replica configuration to use for all replicas."},
+    )
     global_scheduler_config: BaseGlobalSchedulerConfig = field(
         default_factory=RoundRobinGlobalSchedulerConfig,
         metadata={"help": "Global scheduler config."},
@@ -621,6 +670,49 @@ class ClusterConfig:
         default_factory=SarathiSchedulerConfig,
         metadata={"help": "Replica scheduler config."},
     )
+    
+    def __post_init__(self):
+        # For backward compatibility with existing code
+        self.num_replicas = self.num_prefill_replicas + self.num_decode_replicas + self.num_hybrid_replicas
+        
+    @property
+    def replica_configs(self) -> List[BaseReplicaConfig]:
+        """
+        Generate replica configs based on counts. This property maintains backward
+        compatibility with existing code that expects a list of replica configs.
+        """
+        configs = []
+        
+        # Create a copy of the base config as dictionary but remove calculated attributes
+        config_dict = dataclass_to_dict(self.replica_config)
+        
+        # Remove attributes that are calculated in __post_init__
+        # and shouldn't be passed as constructor arguments
+        if 'world_size' in config_dict:
+            del config_dict['world_size']
+        if 'model_config' in config_dict:
+            del config_dict['model_config']
+        if 'device_config' in config_dict:
+            del config_dict['device_config']
+        if 'node_config' in config_dict:
+            del config_dict['node_config']
+            
+        # Create prefill-only replicas
+        for _ in range(self.num_prefill_replicas):
+            config = PrefillOnlyReplicaConfig(**config_dict)
+            configs.append(config)
+            
+        # Create decode-only replicas
+        for _ in range(self.num_decode_replicas):
+            config = DecodeOnlyReplicaConfig(**config_dict)
+            configs.append(config)
+            
+        # Create hybrid replicas
+        for _ in range(self.num_hybrid_replicas):
+            config = HybridReplicaConfig(**config_dict)
+            configs.append(config)
+            
+        return configs
 
 
 @dataclass

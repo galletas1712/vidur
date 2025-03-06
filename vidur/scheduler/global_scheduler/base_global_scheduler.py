@@ -1,12 +1,15 @@
 from abc import ABC, abstractmethod
-from typing import Dict, List, Tuple
+from typing import Dict, List, Set, Tuple
 
 from vidur.config import SimulationConfig
 from vidur.entities import Replica, Request
 from vidur.execution_time_predictor import ExecutionTimePredictorRegistry
+from vidur.logger import init_logger
 from vidur.scheduler.replica_scheduler.replica_scheduler_registry import (
     ReplicaSchedulerRegistry,
 )
+
+logger = init_logger(__name__)
 
 
 class BaseGlobalScheduler(ABC):
@@ -15,6 +18,20 @@ class BaseGlobalScheduler(ABC):
         self._replicas = replicas
 
         self._num_replicas = len(self._replicas)
+        
+        # Create maps of replica IDs by type for quick access
+        self._prefill_capable_replicas = {
+            replica_id for replica_id, replica in replicas.items() 
+            if replica.can_handle_prefill
+        }
+        self._decode_capable_replicas = {
+            replica_id for replica_id, replica in replicas.items() 
+            if replica.can_handle_decode
+        }
+        
+        # Print out information about replica types
+        logger.info(f"Prefill-capable replicas: {self._prefill_capable_replicas}")
+        logger.info(f"Decode-capable replicas: {self._decode_capable_replicas}")
 
         execution_time_predictor = ExecutionTimePredictorRegistry.get(
             config.execution_time_predictor_config.get_type(),
@@ -57,6 +74,23 @@ class BaseGlobalScheduler(ABC):
             for replica_scheduler in self._replica_schedulers.values()
         )
 
+    def get_eligible_replicas_for_request(self, request: Request) -> Set[int]:
+        """
+        Get the set of replicas that can handle the given request based on its phase.
+        
+        Args:
+            request: The request to find eligible replicas for
+            
+        Returns:
+            A set of replica IDs that can handle the request
+        """
+        if request.is_prefill_complete:
+            # If the request has completed prefill, it needs decode-capable replicas
+            return self._decode_capable_replicas
+        else:
+            # If the request is in prefill phase, it needs prefill-capable replicas
+            return self._prefill_capable_replicas
+    
     @abstractmethod
     def schedule(self) -> List[Tuple[int, Request]]:
         pass

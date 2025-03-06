@@ -24,8 +24,9 @@ class Cluster(BaseEntity):
         # Init replica object handles
         self._replicas = {}
 
-        for _ in range(self._config.num_replicas):
-            replica = Replica(self._config.replica_config, generator_config)
+        # Create replicas based on the configuration
+        for replica_config in self._config.replica_configs:
+            replica = Replica(replica_config, generator_config)
             self._replicas[replica.id] = replica
 
         if metrics_config.write_json_trace:

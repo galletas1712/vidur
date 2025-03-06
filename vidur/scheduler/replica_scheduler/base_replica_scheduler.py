@@ -31,6 +31,11 @@ class BaseReplicaScheduler(ABC):
         self._replica_id = replica.id
         self._num_stages = num_stages
 
+        # Add to BaseReplicaScheduler.__init__():
+        self._replica_type = replica.replica_type
+        self._can_handle_prefill = replica.can_handle_prefill
+        self._can_handle_decode = replica.can_handle_decode
+
         self._max_blocks_per_sequence = (
             self._request_generator_config.max_tokens // self._config.block_size
         )
@@ -100,6 +105,23 @@ class BaseReplicaScheduler(ABC):
 
     def add_request(self, request: Request) -> None:
         self._request_queue.append(request)
+        
+    def remove_request(self, request_id: int) -> None:
+        """
+        Remove a request from the scheduler when it's being relocated to another replica.
+        This is used when a request completes its prefill stage and needs to be moved.
+        
+        Args:
+            request_id: The ID of the request to remove
+        """
+        # Remove from request queue if it's there
+        self._request_queue = [req for req in self._request_queue if req.id != request_id]
+        
+        # Free allocated memory blocks for this request if they exist
+        if request_id in self._allocation_map:
+            self.free(request_id)
+            
+        logger.debug(f"Removed request {request_id} from replica {self._replica_id} for relocation")
 
     def get_replica_stage_scheduler(self, stage_id: int):
         return self._replica_stage_schedulers[stage_id]
@@ -118,6 +140,8 @@ class BaseReplicaScheduler(ABC):
 
     def free(self, *request_ids: List[int]) -> None:
         for request_id in request_ids:
+            if request_id not in self._allocation_map:
+                continue
             num_blocks = self._allocation_map.pop(request_id)
             self._num_allocated_blocks -= num_blocks
 

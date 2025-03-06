@@ -7,6 +7,7 @@ from vidur.types.global_scheduler_type import GlobalSchedulerType
 from vidur.types.node_sku_type import NodeSKUType
 from vidur.types.norm_type import NormType
 from vidur.types.replica_scheduler_type import ReplicaSchedulerType
+from vidur.types.replica_type import ReplicaType
 from vidur.types.request_generator_type import RequestGeneratorType
 from vidur.types.request_interval_generator_type import RequestIntervalGeneratorType
 from vidur.types.request_length_generator_type import RequestLengthGeneratorType
@@ -19,6 +20,7 @@ __all__ = [
     RequestLengthGeneratorType,
     RequestIntervalGeneratorType,
     ReplicaSchedulerType,
+    ReplicaType,
     DeviceSKUType,
     NodeSKUType,
     NormType,
