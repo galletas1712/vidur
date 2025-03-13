@@ -5,9 +5,9 @@ import enum
 
 class DistributionShiftStage(enum.Enum):
     """Stage of distribution shift execution."""
-    PRIMARY_FIRST = "primary_first"
-    SECONDARY = "secondary"
-    PRIMARY_LAST = "primary_last"
+    stage1primary = "stage1primary"
+    stage2secondary = "stage2secondary"
+    stage3primary = "stage3primary"
 
 
 class OperationMetrics(enum.Enum):

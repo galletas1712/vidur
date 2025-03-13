@@ -197,7 +197,7 @@ class DistributionShiftRequestLengthGeneratorConfig(BaseRequestLengthGeneratorCo
         default="data/processed_traces/splitwise_conv.csv",
         metadata={"help": "Path to the primary trace file."},
     )
-    secondary_trace_file: str = field(
+    stage2secondary_trace_file: str = field(
         default="data/processed_traces/splitwise_code.csv",
         metadata={"help": "Path to the secondary trace file to shift to."},
     )

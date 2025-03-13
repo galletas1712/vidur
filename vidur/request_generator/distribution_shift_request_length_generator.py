@@ -26,7 +26,7 @@ class DistributionShiftRequestLengthGenerator(BaseRequestLengthGenerator):
         # Extract parameters from config
         self.config = config
         self.primary_trace_file = getattr(config, "primary_trace_file", "data/processed_traces/splitwise_conv.csv")
-        self.secondary_trace_file = getattr(config, "secondary_trace_file", "data/processed_traces/splitwise_code.csv")
+        self.stage2secondary_trace_file = getattr(config, "stage2secondary_trace_file", "data/processed_traces/splitwise_code.csv")
         self.distribution_shift_ratio = getattr(config, "distribution_shift_ratio", 0.3)
         self.prefill_scale_factor = getattr(config, "prefill_scale_factor", 1.0)
         self.decode_scale_factor = getattr(config, "decode_scale_factor", 1.0)
@@ -36,10 +36,10 @@ class DistributionShiftRequestLengthGenerator(BaseRequestLengthGenerator):
         self.primary_trace_df = pd.read_csv(self.primary_trace_file)
         self._preprocess_trace_df(self.primary_trace_df, "primary")
         
-        # Load secondary trace
-        logger.info(f"Loading secondary trace file: {self.secondary_trace_file}")
-        self.secondary_trace_df = pd.read_csv(self.secondary_trace_file)
-        self._preprocess_trace_df(self.secondary_trace_df, "secondary")
+        # Load stage2secondary trace
+        logger.info(f"Loading stage2secondary trace file: {self.stage2secondary_trace_file}")
+        self.stage2secondary_trace_df = pd.read_csv(self.stage2secondary_trace_file)
+        self._preprocess_trace_df(self.stage2secondary_trace_df, "stage2secondary")
 
         # Set random seed
         np.random.seed(config.seed)
@@ -88,42 +88,42 @@ class DistributionShiftRequestLengthGenerator(BaseRequestLengthGenerator):
         """
         # Determine the number of samples to take from each trace
         total_samples = self.config.num_requests
-        secondary_count = int(total_samples * self.distribution_shift_ratio)
-        primary_count = total_samples - secondary_count
-        primary_first_count = primary_count // 2
-        primary_last_count = primary_count - primary_first_count
+        stage2secondary_count = int(total_samples * self.distribution_shift_ratio)
+        primary_count = total_samples - stage2secondary_count
+        stage1primary_count = primary_count // 2
+        stage3primary_count = primary_count - stage1primary_count
         
         logger.info(f"Creating distribution shift pattern:")
-        logger.info(f"  Primary trace (first segment): {primary_first_count} samples")
-        logger.info(f"  Secondary trace (middle segment): {secondary_count} samples")
-        logger.info(f"  Primary trace (last segment): {primary_last_count} samples")
+        logger.info(f"  Primary trace (first segment): {stage1primary_count} samples")
+        logger.info(f"  stage2secondary trace (middle segment): {stage2secondary_count} samples")
+        logger.info(f"  Primary trace (last segment): {stage3primary_count} samples")
         
         # Shuffle and sample from both traces
         primary_df = self.primary_trace_df.sample(frac=1, random_state=self.config.seed)
-        secondary_df = self.secondary_trace_df.sample(frac=1, random_state=self.config.seed)
+        stage2secondary_df = self.stage2secondary_trace_df.sample(frac=1, random_state=self.config.seed)
         
         # Create three segments
         self.all_samples = []
         
         # First segment from primary trace (looping if needed)
-        for i in range(primary_first_count):
+        for i in range(stage1primary_count):
             idx = i % len(primary_df)
             self.all_samples.append((
                 primary_df.iloc[idx]["num_prefill_tokens"],
                 primary_df.iloc[idx]["num_decode_tokens"]
             ))
         
-        # Middle segment from secondary trace (looping if needed)
-        for i in range(secondary_count):
-            idx = i % len(secondary_df)
+        # Middle segment from stage2secondary trace (looping if needed)
+        for i in range(stage2secondary_count):
+            idx = i % len(stage2secondary_df)
             self.all_samples.append((
-                secondary_df.iloc[idx]["num_prefill_tokens"],
-                secondary_df.iloc[idx]["num_decode_tokens"]
+                stage2secondary_df.iloc[idx]["num_prefill_tokens"],
+                stage2secondary_df.iloc[idx]["num_decode_tokens"]
             ))
         
         # Last segment from primary trace (looping if needed)
-        for i in range(primary_last_count):
-            idx = (i + primary_first_count) % len(primary_df)
+        for i in range(stage3primary_count):
+            idx = (i + stage1primary_count) % len(primary_df)
             self.all_samples.append((
                 primary_df.iloc[idx]["num_prefill_tokens"],
                 primary_df.iloc[idx]["num_decode_tokens"]
