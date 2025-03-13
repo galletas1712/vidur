@@ -46,8 +46,6 @@ class Batch(BaseEntity):
             ]
         )
 
-        self._total_num_tokens_rounded = (self._total_num_tokens + 7) // 8 * 8
-
         self._scheduled_at = None
         self._completed_at = None
         self._scheduled = False
@@ -68,6 +66,10 @@ class Batch(BaseEntity):
     @property
     def total_num_tokens(self) -> int:
         return self._total_num_tokens
+    
+    @property
+    def total_num_tokens_rounded(self) -> int:
+        return (self._total_num_tokens + 7) // 8 * 8
 
     @property
     def num_prefill_tokens(self) -> int:

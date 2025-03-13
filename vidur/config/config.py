@@ -1,3 +1,4 @@
+import copy
 import json
 import os
 from abc import ABC
@@ -74,7 +75,7 @@ class TraceRequestIntervalGeneratorConfig(BaseRequestIntervalGeneratorConfig):
 @dataclass
 class PoissonRequestIntervalGeneratorConfig(BaseRequestIntervalGeneratorConfig):
     qps: float = field(
-        default=0.5,
+        default=8.0,
         metadata={"help": "Queries per second for Poisson Request Interval Generator."},
     )
 
@@ -111,17 +112,17 @@ class StaticRequestIntervalGeneratorConfig(BaseRequestIntervalGeneratorConfig):
 @dataclass
 class TraceRequestLengthGeneratorConfig(BaseRequestLengthGeneratorConfig):
     trace_file: str = field(
-        default="data/processed_traces/sharegpt_8k_filtered_stats_llama2_tokenizer.csv",
+        default="data/processed_traces/splitwise_code.csv",
         metadata={"help": "Path to the trace request length generator file."},
     )
     prefill_scale_factor: float = field(
-        default=1,
+        default=2,
         metadata={
             "help": "Prefill scale factor for the trace request length generator."
         },
     )
     decode_scale_factor: float = field(
-        default=1,
+        default=2,
         metadata={
             "help": "Decode scale factor for the trace request length generator."
         },
@@ -191,6 +192,37 @@ class FixedRequestLengthGeneratorConfig(BaseRequestLengthGeneratorConfig):
 
 
 @dataclass
+class DistributionShiftRequestLengthGeneratorConfig(BaseRequestLengthGeneratorConfig):
+    primary_trace_file: str = field(
+        default="data/processed_traces/splitwise_conv.csv",
+        metadata={"help": "Path to the primary trace file."},
+    )
+    secondary_trace_file: str = field(
+        default="data/processed_traces/splitwise_code.csv",
+        metadata={"help": "Path to the secondary trace file to shift to."},
+    )
+    distribution_shift_ratio: float = field(
+        default=0.3,
+        metadata={"help": "Percentage of requests to sample from secondary trace (0.0-1.0)."},
+    )
+    num_requests: int = field(
+        default=1024,
+        metadata={"help": "Number of requests for Distribution Shift Request Length Generator."},
+    )
+    prefill_scale_factor: float = field(
+        default=2.0,
+        metadata={"help": "Prefill scale factor for both traces."},
+    )
+    decode_scale_factor: float = field(
+        default=2.0,
+        metadata={"help": "Decode scale factor for both traces."},
+    )
+
+    @staticmethod
+    def get_type():
+        return RequestLengthGeneratorType.DISTRIBUTION_SHIFT
+
+@dataclass
 class BaseRequestGeneratorConfig(BasePolyConfig):
     seed: int = field(
         default=42,
@@ -209,7 +241,7 @@ class SyntheticRequestGeneratorConfig(BaseRequestGeneratorConfig):
         metadata={"help": "Interval generator config for Synthetic Request Generator."},
     )
     num_requests: Optional[int] = field(
-        default=128,
+        default=1024,
         metadata={"help": "Number of requests for Synthetic Request Generator."},
     )
     duration: Optional[float] = field(
@@ -429,7 +461,7 @@ class MetricsConfig:
 class BaseReplicaConfig:
     """Base class for all replica configurations."""
     model_name: str = field(
-        default="meta-llama/Llama-2-7b-hf",
+        default="meta-llama/Meta-Llama-3-8B",
         metadata={"help": "Model name."},
     )
     memory_margin_fraction: float = field(
@@ -647,71 +679,67 @@ class RandomForrestExecutionTimePredictorConfig(BaseExecutionTimePredictorConfig
 @dataclass
 class ClusterConfig:
     num_prefill_replicas: int = field(
-        default=1,
+        default=3,
         metadata={"help": "Number of prefill-only replicas to create."},
     )
     num_decode_replicas: int = field(
-        default=1,
+        default=13,
         metadata={"help": "Number of decode-only replicas to create."},
     )
     num_hybrid_replicas: int = field(
         default=0,
         metadata={"help": "Number of hybrid replicas to create."},
     )
-    replica_config: BaseReplicaConfig = field(
+    prefill_replica_config: PrefillOnlyReplicaConfig = field(
+        default_factory=PrefillOnlyReplicaConfig,
+        metadata={"help": "Configuration for prefill-only replicas."},
+    )
+    decode_replica_config: DecodeOnlyReplicaConfig = field(
+        default_factory=DecodeOnlyReplicaConfig,
+        metadata={"help": "Configuration for decode-only replicas."},
+    )
+    hybrid_replica_config: HybridReplicaConfig = field(
         default_factory=HybridReplicaConfig,
-        metadata={"help": "Base replica configuration to use for all replicas."},
+        metadata={"help": "Configuration for hybrid replicas."},
+    )
+    prefill_replica_scheduler_config: VllmSchedulerConfig = field(
+        default_factory=VllmSchedulerConfig,
+        metadata={"help": "Prefill replica scheduler config."},
+    )
+    decode_replica_scheduler_config: SarathiSchedulerConfig = field(
+        default_factory=SarathiSchedulerConfig,
+        metadata={"help": "Decode replica scheduler config."},
+    )
+    hybrid_replica_scheduler_config: SarathiSchedulerConfig = field(
+        default_factory=SarathiSchedulerConfig,
+        metadata={"help": "Hybrid replica scheduler config."},
     )
     global_scheduler_config: BaseGlobalSchedulerConfig = field(
         default_factory=RoundRobinGlobalSchedulerConfig,
         metadata={"help": "Global scheduler config."},
     )
-    replica_scheduler_config: BaseReplicaSchedulerConfig = field(
-        default_factory=SarathiSchedulerConfig,
-        metadata={"help": "Replica scheduler config."},
-    )
     
     def __post_init__(self):
-        # For backward compatibility with existing code
         self.num_replicas = self.num_prefill_replicas + self.num_decode_replicas + self.num_hybrid_replicas
         
     @property
     def replica_configs(self) -> List[BaseReplicaConfig]:
-        """
-        Generate replica configs based on counts. This property maintains backward
-        compatibility with existing code that expects a list of replica configs.
-        """
-        configs = []
+        configs = [
+            *[copy.deepcopy(self.prefill_replica_config) for _ in range(self.num_prefill_replicas)],
+            *[copy.deepcopy(self.decode_replica_config) for _ in range(self.num_decode_replicas)],
+            *[copy.deepcopy(self.hybrid_replica_config) for _ in range(self.num_hybrid_replicas)]
+        ]
         
-        # Create a copy of the base config as dictionary but remove calculated attributes
-        config_dict = dataclass_to_dict(self.replica_config)
+        return configs
+    
+    @property
+    def replica_scheduler_configs(self) -> List[BaseReplicaSchedulerConfig]:
+        configs = [
+            *[copy.deepcopy(self.prefill_replica_scheduler_config) for _ in range(self.num_prefill_replicas)],
+            *[copy.deepcopy(self.decode_replica_scheduler_config) for _ in range(self.num_decode_replicas)],
+            *[copy.deepcopy(self.hybrid_replica_scheduler_config) for _ in range(self.num_hybrid_replicas)]
+        ]
         
-        # Remove attributes that are calculated in __post_init__
-        # and shouldn't be passed as constructor arguments
-        if 'world_size' in config_dict:
-            del config_dict['world_size']
-        if 'model_config' in config_dict:
-            del config_dict['model_config']
-        if 'device_config' in config_dict:
-            del config_dict['device_config']
-        if 'node_config' in config_dict:
-            del config_dict['node_config']
-            
-        # Create prefill-only replicas
-        for _ in range(self.num_prefill_replicas):
-            config = PrefillOnlyReplicaConfig(**config_dict)
-            configs.append(config)
-            
-        # Create decode-only replicas
-        for _ in range(self.num_decode_replicas):
-            config = DecodeOnlyReplicaConfig(**config_dict)
-            configs.append(config)
-            
-        # Create hybrid replicas
-        for _ in range(self.num_hybrid_replicas):
-            config = HybridReplicaConfig(**config_dict)
-            configs.append(config)
-            
         return configs
 
 

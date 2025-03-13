@@ -41,6 +41,7 @@ class RoundRobinGlobalScheduler(BaseGlobalScheduler):
                 self._prefill_counter += 1
             
             replica_id = eligible_replicas[replica_index]
+            logger.debug(f"RR Global Scheduler assigning request {request.id} to replica {replica_id}")
             request_mapping.append((replica_id, request))
 
         return request_mapping

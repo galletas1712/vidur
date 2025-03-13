@@ -1,3 +1,6 @@
+from vidur.request_generator.distribution_shift_request_length_generator import (
+    DistributionShiftRequestLengthGenerator,
+)
 from vidur.request_generator.fixed_request_length_generator import (
     FixedRequestLengthGenerator,
 )
@@ -29,4 +32,7 @@ RequestLengthGeneratorRegistry.register(
 )
 RequestLengthGeneratorRegistry.register(
     RequestLengthGeneratorType.FIXED, FixedRequestLengthGenerator
+)
+RequestLengthGeneratorRegistry.register(
+    RequestLengthGeneratorType.DISTRIBUTION_SHIFT, DistributionShiftRequestLengthGenerator
 )

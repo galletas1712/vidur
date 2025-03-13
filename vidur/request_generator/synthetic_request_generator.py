@@ -47,6 +47,7 @@ class SyntheticRequestGenerator(BaseRequestGenerator):
             arrived_at=arrived_at,
             num_prefill_tokens=int(prefill_tokens),
             num_decode_tokens=int(decode_tokens),
+            num_processed_tokens=0
         )
 
     def _generate_requests(self) -> List[Request]:

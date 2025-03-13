@@ -3,6 +3,13 @@
 import enum
 
 
+class DistributionShiftStage(enum.Enum):
+    """Stage of distribution shift execution."""
+    PRIMARY_FIRST = "primary_first"
+    SECONDARY = "secondary"
+    PRIMARY_LAST = "primary_last"
+
+
 class OperationMetrics(enum.Enum):
     MLP_UP_PROJ = "mlp_up_proj"
     MLP_ACTIVATION = "mlp_activation"

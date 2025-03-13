@@ -33,22 +33,21 @@ class BaseGlobalScheduler(ABC):
         logger.info(f"Prefill-capable replicas: {self._prefill_capable_replicas}")
         logger.info(f"Decode-capable replicas: {self._decode_capable_replicas}")
 
-        execution_time_predictor = ExecutionTimePredictorRegistry.get(
-            config.execution_time_predictor_config.get_type(),
-            predictor_config=config.execution_time_predictor_config,
-            replica_config=config.cluster_config.replica_config,
-            replica_scheduler_config=config.cluster_config.replica_scheduler_config,
-            metrics_config=config.metrics_config,
-        )
         self._replica_schedulers = {
             replica_id: ReplicaSchedulerRegistry.get(
-                config.cluster_config.replica_scheduler_config.get_type(),
-                replica_config=config.cluster_config.replica_config,
-                replica_scheduler_config=config.cluster_config.replica_scheduler_config,
+                config.cluster_config.replica_scheduler_configs[replica_id].get_type(),
+                replica_config=config.cluster_config.replica_configs[replica_id],
+                replica_scheduler_config=config.cluster_config.replica_scheduler_configs[replica_id],
                 request_generator_config=config.request_generator_config,
                 replica=replica,
                 num_stages=replica.num_pipeline_stages,
-                execution_time_predictor=execution_time_predictor,
+                execution_time_predictor=ExecutionTimePredictorRegistry.get(
+                    config.execution_time_predictor_config.get_type(),
+                    predictor_config=config.execution_time_predictor_config,
+                    replica_config=config.cluster_config.replica_configs[replica_id],
+                    replica_scheduler_config=config.cluster_config.replica_scheduler_configs[replica_id],
+                    metrics_config=config.metrics_config,
+                ),
             )
             for replica_id, replica in replicas.items()
         }

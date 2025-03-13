@@ -729,7 +729,7 @@ class SklearnExecutionTimePredictor(BaseExecutionTimePredictor):
         decode_kv_cache_sizes = []
 
         for request in batch.requests:
-            if request._is_prefill_complete:
+            if request.is_prefill_complete:
                 decode_kv_cache_sizes.append(request.num_processed_tokens)
 
         if not decode_kv_cache_sizes:
@@ -760,7 +760,7 @@ class SklearnExecutionTimePredictor(BaseExecutionTimePredictor):
         prefill_params = []
 
         for request, num_tokens_to_process in zip(batch.requests, batch.num_tokens):
-            if request._is_prefill_complete:
+            if request.is_prefill_complete:
                 continue
 
             prefill_chunk_size = num_tokens_to_process
@@ -777,40 +777,43 @@ class SklearnExecutionTimePredictor(BaseExecutionTimePredictor):
 
         batch._prefill_params = prefill_params
 
+        if batch.num_prefill_tokens == 0:
+            assert len(prefill_params) == 0
+
         return prefill_params
 
     def _get_attention_layer_pre_proj_execution_time(self, batch: Batch) -> float:
-        return self._predictions["attn_pre_proj"][(batch._total_num_tokens_rounded,)]
+        return self._predictions["attn_pre_proj"][(batch.total_num_tokens_rounded,)]
 
     def _get_attention_layer_post_proj_execution_time(self, batch: Batch) -> float:
-        return self._predictions["attn_post_proj"][(batch._total_num_tokens_rounded,)]
+        return self._predictions["attn_post_proj"][(batch.total_num_tokens_rounded,)]
 
     def _get_mlp_layer_up_proj_execution_time(self, batch: Batch) -> float:
-        return self._predictions["mlp_up_proj"][(batch._total_num_tokens_rounded,)]
+        return self._predictions["mlp_up_proj"][(batch.total_num_tokens_rounded,)]
 
     def _get_mlp_layer_down_proj_execution_time(self, batch: Batch) -> float:
-        return self._predictions["mlp_down_proj"][(batch._total_num_tokens_rounded,)]
+        return self._predictions["mlp_down_proj"][(batch.total_num_tokens_rounded,)]
 
     def _get_mlp_layer_act_execution_time(self, batch: Batch) -> float:
-        return self._predictions["mlp_act"][(batch._total_num_tokens_rounded,)]
+        return self._predictions["mlp_act"][(batch.total_num_tokens_rounded,)]
 
     def _get_attn_norm_layer_act_execution_time(self, batch: Batch) -> float:
-        return self._predictions["input_layernorm"][(batch._total_num_tokens_rounded,)]
+        return self._predictions["input_layernorm"][(batch.total_num_tokens_rounded,)]
 
     def _get_mlp_norm_layer_act_execution_time(self, batch: Batch) -> float:
         if not self._model_config.post_attn_norm:
             return 0
 
         return self._predictions["post_attention_layernorm"][
-            (batch._total_num_tokens_rounded,)
+            (batch.total_num_tokens_rounded,)
         ]
 
     def _get_add_layer_act_execution_time(self, batch: Batch) -> float:
-        return self._predictions["add"][(batch._total_num_tokens_rounded,)]
+        return self._predictions["add"][(batch.total_num_tokens_rounded,)]
 
     def _get_tensor_parallel_communication_time(self, batch: Batch) -> float:
         return (
-            self._predictions["all_reduce"][(batch._total_num_tokens_rounded,)]
+            self._predictions["all_reduce"][(batch.total_num_tokens_rounded,)]
             + self._config.nccl_cpu_launch_overhead_ms
             + self._config.nccl_cpu_skew_overhead_per_device_ms
             * self._replica_config.tensor_parallel_size**1.25
@@ -818,13 +821,13 @@ class SklearnExecutionTimePredictor(BaseExecutionTimePredictor):
 
     def _get_pipeline_parallel_communication_time(self, batch: Batch) -> float:
         try:
-            return self._predictions["send_recv"][(batch._total_num_tokens_rounded,)]
+            return self._predictions["send_recv"][(batch.total_num_tokens_rounded,)]
         except KeyError as e:
             logger.error(f"Failed to get send_recv prediction for batch {batch}")
             raise e
 
     def _get_attention_rope_execution_time(self, batch: Batch) -> float:
-        return self._predictions["attn_rope"][(batch._total_num_tokens_rounded,)]
+        return self._predictions["attn_rope"][(batch.total_num_tokens_rounded,)]
 
     def _get_attention_kv_cache_save_execution_time(self, batch: Batch) -> float:
         # don't use round up to the nearest multiple of 8 here, because we want to

@@ -1,4 +1,3 @@
-from math import ceil
 from typing import List
 
 from vidur.entities.batch import Batch, Request
@@ -27,53 +26,6 @@ class VLLMReplicaScheduler(BaseReplicaScheduler):
             self._preempted_requests.append(request)
         else:
             super().add_request(request)
-
-    def on_batch_end(self, batch: Batch) -> None:
-        self._num_running_batches -= 1
-
-        for request in batch.requests:
-            if request.completed:
-                self.free(request.id)
-            else:
-                self._preempted_requests.append(request)
-
-    def _can_allocate_request(self, request: Request) -> bool:
-        if request.id not in self._allocation_map:
-            # new request
-            num_required_blocks = ceil(
-                max(request.num_prefill_tokens, request.num_processed_tokens) / self._config.block_size
-            )
-            return (
-                self._config.num_blocks
-                - self._num_allocated_blocks
-                - num_required_blocks
-                >= self._watermark_blocks
-            )
-
-        # vllm requires at least one block to be available
-        return self._config.num_blocks - self._num_allocated_blocks >= 1
-
-    def _allocate_request(self, request: Request) -> None:
-        if request.id not in self._allocation_map:
-            # new request
-            num_required_blocks = ceil(
-                 max(request.num_prefill_tokens, request.num_processed_tokens) / self._config.block_size
-            )
-            print("Allocating", num_required_blocks, "blocks for request", request.id, "num_prefill_tokens", request.num_prefill_tokens, "num_processed_tokens", request.num_processed_tokens)
-            self.allocate(request.id, num_required_blocks)
-            return
-
-        num_tokens_reserved = self._allocation_map[request.id] * self._config.block_size
-        num_tokens_required = max(0, request.num_processed_tokens - num_tokens_reserved)
-
-        assert (
-            num_tokens_required <= 2
-        ), f"num_tokens_required: {num_tokens_required} for request {request.id}, num_tokens_reserved: {num_tokens_reserved}, num_prefill_tokens: {request.num_prefill_tokens}, num_processed_tokens: {request.num_processed_tokens}"
-
-        if num_tokens_required == 0:
-            return
-
-        self.allocate(request.id, num_tokens_required)
 
     def _get_next_batch(self) -> Batch:
         requests = []
@@ -121,11 +73,13 @@ class VLLMReplicaScheduler(BaseReplicaScheduler):
             while not self._can_allocate_request(request):
                 if self._preempted_requests:
                     victim_request = self._preempted_requests.pop(-1)
-                    victim_request.restart()
+                    # NOTE: we assume no recomputation, fully hidden async swap-out and swap-ins
+                    # victim_request.restart()
                     self.free(victim_request.id)
                     self._request_queue = [victim_request] + self._request_queue
                 else:
-                    request.restart()
+                    # NOTE: Same as above
+                    # request.restart()
                     self.free(request.id)
                     self._request_queue = [request] + self._request_queue
                     break

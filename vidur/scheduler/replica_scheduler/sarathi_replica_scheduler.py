@@ -1,5 +1,3 @@
-from math import ceil
-
 from vidur.entities.batch import Batch, Request
 from vidur.scheduler.replica_scheduler.base_replica_scheduler import (
     BaseReplicaScheduler,
@@ -27,61 +25,6 @@ class SarathiReplicaScheduler(BaseReplicaScheduler):
             self._preempted_requests.append(request)
         else:
             super().add_request(request)
-
-    def _can_allocate_request(self, request: Request) -> bool:
-        if request.id not in self._allocation_map:
-            # new request
-            num_required_blocks = ceil(
-                max(request.num_prefill_tokens, request.num_processed_tokens) / self._config.block_size
-            )
-            return (
-                self._config.num_blocks
-                - self._num_allocated_blocks
-                - num_required_blocks
-                >= self._watermark_blocks
-            )
-
-        # vllm requires at least one block to be available
-        return self._config.num_blocks - self._num_allocated_blocks >= 1
-
-    def _allocate_request(self, request: Request) -> None:
-        if request.id not in self._allocation_map:
-            # new request
-            num_required_blocks = ceil(
-                 max(request.num_prefill_tokens, request.num_processed_tokens) / self._config.block_size
-            )
-            self.allocate(request.id, num_required_blocks)
-            return
-
-        num_tokens_reserved = self._allocation_map[request.id] * self._config.block_size
-        num_tokens_required = max(0, request.num_processed_tokens - num_tokens_reserved)
-
-        assert (
-            num_tokens_required <= 2
-        ), f"num_tokens_required: {num_tokens_required} for request {request.id}, num_tokens_reserved: {num_tokens_reserved}, num_prefill_tokens: {request.num_prefill_tokens}, num_processed_tokens: {request.num_processed_tokens}"
-
-        if num_tokens_required == 0:
-            return
-
-        self.allocate(request.id, num_tokens_required)
-
-    def on_batch_end(self, batch: Batch) -> None:
-        self._num_running_batches -= 1
-
-        for request in batch.requests:
-            # Skip requests that just completed prefill in a prefill-only replica
-            if request.prefill_completed_at == batch.completed_at and not self._can_handle_decode:
-                # This request will be removed by the batch_end_event handler
-                continue
-
-            if request.completed:
-                if request.id in self._allocation_map:
-                    self.free(request.id)
-            else:
-                # Only add to preempted_requests if this replica can handle the request's phase
-                if (not request.is_prefill_complete and self._can_handle_prefill) or \
-                    (request.is_prefill_complete and self._can_handle_decode):
-                    self._preempted_requests.append(request)
 
     def _get_request_next_num_tokens(
         self, request: Request, batch_contains_prefill: bool, num_batch_tokens: int
@@ -131,11 +74,13 @@ class SarathiReplicaScheduler(BaseReplicaScheduler):
             while not self._can_allocate_request(request):
                 if self._preempted_requests:
                     victim_request = self._preempted_requests.pop(-1)
-                    victim_request.restart()
+                    # NOTE: we assume no recomputation, fully hidden async swap-out and swap-ins
+                    # victim_request.restart()
                     self.free(victim_request.id)
                     self._request_queue = [victim_request] + self._request_queue
                 else:
-                    request.restart()
+                    # NOTE: Same here
+                    # request.restart()
                     self.free(request.id)
                     self._request_queue = [request] + self._request_queue
                     break

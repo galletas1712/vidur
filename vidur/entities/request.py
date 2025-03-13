@@ -31,7 +31,7 @@ class Request(BaseEntity):
         arrived_at: float,
         num_prefill_tokens: int,
         num_decode_tokens: int,
-        num_processed_tokens: int = 0,
+        num_processed_tokens: int,
     ):
         self._id = Request.generate_id()
         self._arrived_at = arrived_at
@@ -176,6 +176,21 @@ class Request(BaseEntity):
         return max(self._num_processed_tokens - self._num_prefill_tokens, 0)
 
     @property
+    def just_finished_prefill(self) -> bool:
+        # NOTE: technically we get one token when the prefill completes but this is negligible
+        # Makes modeling simpler if we don't include it in our calculation
+
+        return self._num_processed_tokens == self._num_prefill_tokens
+
+    @property
+    def is_prefill_complete(self) -> bool:
+        return self._num_processed_tokens >= self._num_prefill_tokens
+
+    @property
+    def has_started_decode(self) -> bool:
+        return self._num_processed_tokens > self._num_prefill_tokens
+
+    @property
     def scheduled(self) -> bool:
         return self._scheduled
 
@@ -190,14 +205,6 @@ class Request(BaseEntity):
     @property
     def num_restarts(self) -> int:
         return self._num_restarts
-
-    @property
-    def is_prefill_complete(self) -> bool:
-        return self._is_prefill_complete
-
-    @property
-    def has_started_decode(self) -> bool:
-        return self._num_processed_tokens > self._num_prefill_tokens + 1
 
     def on_batch_schedule(
         self,
@@ -225,17 +232,9 @@ class Request(BaseEntity):
         num_tokens_processed: int,
     ) -> None:
         self._num_processed_tokens += num_tokens_processed
-        if self._num_processed_tokens > self.total_tokens:
-            self._num_processed_tokens = self.total_tokens
-            # NOTE: WARNING THIS IS JUST A HACKY PATCH
-            # TODO: Fix this properly
         self._latest_iteration_completed_at = time
 
-        if self._num_processed_tokens == self._num_prefill_tokens:
-            self._is_prefill_complete = True
-            # we get one decode token when the prefill processing completes
-            self._num_processed_tokens += 1
-
+        if self.just_finished_prefill:
             # we must record the prefill completion time only in the first time
             # in the subsequent restarts, we keep adding the previously decoded
             # tokens to the prefill tokens - that is irrelevant to the original prefill

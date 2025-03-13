@@ -10,12 +10,15 @@ from vidur.logger import init_logger
 from vidur.metrics import MetricsStore
 from vidur.request_generator import RequestGeneratorRegistry
 from vidur.scheduler import BaseGlobalScheduler, GlobalSchedulerRegistry
+from vidur.utils.random import set_seeds
 
 logger = init_logger(__name__)
 
 
 class Simulator:
     def __init__(self, config: SimulationConfig) -> None:
+        set_seeds(config.seed)
+
         self._config: SimulationConfig = config
 
         self._time = 0

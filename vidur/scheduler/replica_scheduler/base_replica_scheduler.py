@@ -1,4 +1,5 @@
 from abc import ABC, abstractmethod
+from math import ceil
 from typing import List
 
 from vidur.config import (
@@ -31,10 +32,9 @@ class BaseReplicaScheduler(ABC):
         self._replica_id = replica.id
         self._num_stages = num_stages
 
-        # Add to BaseReplicaScheduler.__init__():
         self._replica_type = replica.replica_type
-        self._can_handle_prefill = replica.can_handle_prefill
-        self._can_handle_decode = replica.can_handle_decode
+        self.can_handle_prefill = replica.can_handle_prefill
+        self.can_handle_decode = replica.can_handle_decode
 
         self._max_blocks_per_sequence = (
             self._request_generator_config.max_tokens // self._config.block_size
@@ -93,6 +93,10 @@ class BaseReplicaScheduler(ABC):
                 stage_scheduler.is_empty()
                 for stage_scheduler in self._replica_stage_schedulers.values()
             )
+            and (
+                not hasattr(self, "_preempted_requests")
+                or len(self._preempted_requests) == 0
+            )
         )
 
     def _get_request_next_num_tokens(self, request: Request) -> int:
@@ -104,25 +108,9 @@ class BaseReplicaScheduler(ABC):
         return request.num_prefill_tokens
 
     def add_request(self, request: Request) -> None:
+        logger.debug(f"Adding request {request.id} to replica {self._replica_id}")
         self._request_queue.append(request)
         
-    def remove_request(self, request_id: int) -> None:
-        """
-        Remove a request from the scheduler when it's being relocated to another replica.
-        This is used when a request completes its prefill stage and needs to be moved.
-        
-        Args:
-            request_id: The ID of the request to remove
-        """
-        # Remove from request queue if it's there
-        self._request_queue = [req for req in self._request_queue if req.id != request_id]
-        
-        # Free allocated memory blocks for this request if they exist
-        if request_id in self._allocation_map:
-            self.free(request_id)
-            
-        logger.debug(f"Removed request {request_id} from replica {self._replica_id} for relocation")
-
     def get_replica_stage_scheduler(self, stage_id: int):
         return self._replica_stage_schedulers[stage_id]
 
@@ -139,6 +127,8 @@ class BaseReplicaScheduler(ABC):
         assert self._num_allocated_blocks <= self._config.num_blocks
 
     def free(self, *request_ids: List[int]) -> None:
+        if hasattr(self, "_preempted_requests"):
+            assert all(request_id not in self._preempted_requests for request_id in request_ids)
         for request_id in request_ids:
             if request_id not in self._allocation_map:
                 continue
@@ -150,9 +140,65 @@ class BaseReplicaScheduler(ABC):
     def free_batch(self, batch: Batch) -> None:
         self.free(*batch.request_ids)
 
-    @abstractmethod
-    def on_batch_end(self, batch: Batch) -> None:
-        pass
+    def _can_allocate_request(self, request: Request) -> bool:
+        if request.id not in self._allocation_map:
+            # new request
+            num_required_blocks = ceil(
+                max(request.num_prefill_tokens, request.num_processed_tokens) / self._config.block_size
+            )
+            return (
+                self._config.num_blocks
+                - self._num_allocated_blocks
+                - num_required_blocks
+                >= self._watermark_blocks
+            )
+
+        # vllm requires at least one block to be available
+        return self._config.num_blocks - self._num_allocated_blocks >= 1
+
+    def _allocate_request(self, request: Request) -> None:
+        if request.id not in self._allocation_map:
+            # new request
+            num_required_blocks = ceil(
+                 max(request.num_prefill_tokens, request.num_processed_tokens) / self._config.block_size
+            )
+            self.allocate(request.id, num_required_blocks)
+            return
+
+        num_tokens_reserved = self._allocation_map[request.id] * self._config.block_size
+        num_tokens_required = max(0, request.num_processed_tokens - num_tokens_reserved)
+
+        assert (
+            num_tokens_required <= 1
+        ), f"num_tokens_required: {num_tokens_required} for request {request.id}, num_tokens_reserved: {num_tokens_reserved}, num_prefill_tokens: {request.num_prefill_tokens}, num_processed_tokens: {request.num_processed_tokens}"
+
+        if num_tokens_required == 0:
+            return
+
+        self.allocate(request.id, num_tokens_required)
+
+    def on_batch_end(self, batch: Batch) -> List[Request]:
+        self._num_running_batches -= 1
+        requests_to_migrate = []
+
+        for request in batch.requests:
+            if request.completed or (not self.can_handle_decode and request.just_finished_prefill):
+                if request.completed:
+                    logger.debug(f"Request {request.id} completed at replica {self._replica_id}: processed {request.num_processed_tokens}, prefill {request.num_prefill_tokens}, decode {request.num_decode_tokens}. Removing...")
+                else:
+                    requests_to_migrate.append(request)
+                    logger.debug(f"Request {request.id} prefill completed at replica {self._replica_id}. : processed {request.num_processed_tokens}, prefill {request.num_prefill_tokens}, decode {request.num_decode_tokens}. Removing...")
+
+                if request.id in self._allocation_map:
+                    self.free(request.id)
+            else:
+                if not self.can_handle_decode:
+                    assert not request.is_prefil_complete
+                if not self.can_handle_prefill:
+                    assert request.has_started_decode, f"Request {request.id} completion {request.completed}, worker type {self._replica_type}, processed {request.num_processed_tokens}, prefill {request.num_prefill_tokens}, decode {request.num_decode_tokens}"
+                self._preempted_requests.append(request)
+        
+        return requests_to_migrate
 
     @abstractmethod
     def _get_next_batch(self) -> Batch:

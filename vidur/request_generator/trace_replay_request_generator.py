@@ -85,6 +85,7 @@ class TraceReplayRequestGenerator(BaseRequestGenerator):
                 arrived_at=row["arrived_at"],
                 num_prefill_tokens=row["num_prefill_tokens"],
                 num_decode_tokens=row["num_decode_tokens"],
+                num_processed_tokens=0
             )
 
             requests.append(request)

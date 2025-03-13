@@ -1,6 +1,6 @@
 import os
 from functools import reduce
-from typing import Dict, List
+from typing import Dict, List, Optional, Tuple
 
 import pandas as pd
 import plotly_express as px
@@ -14,6 +14,7 @@ from vidur.metrics.constants import (
     BatchMetricsCountDistribution,
     BatchMetricsTimeDistribution,
     CpuOperationMetrics,
+    DistributionShiftStage,
     OperationMetrics,
     RequestCompletionMetricsTimeSeries,
     RequestMetricsHistogram,
@@ -23,6 +24,7 @@ from vidur.metrics.constants import (
 )
 from vidur.metrics.data_series import DataSeries
 from vidur.metrics.series_average_meter import SeriesAverageMeter
+from vidur.types.request_length_generator_type import RequestLengthGeneratorType
 from vidur.utils.mfu_calculator import MFUCalculator
 
 logger = init_logger(__name__)
@@ -45,6 +47,7 @@ BUSY_TIME_PERCENT = "Busy Time (%)"
 UTILIZATION_STR = "Utilization (%)"
 OPERATION_STR = "Operation"
 TIME_STR_MS = "Time (ms)"
+STAGE_STR = "Distribution Shift Stage"
 
 
 class MetricsStore:
@@ -56,10 +59,22 @@ class MetricsStore:
 
         # copy config
         self._num_replicas = self._simulation_config.cluster_config.num_replicas
-        self._num_pipeline_stages = (
-            self._simulation_config.cluster_config.replica_config.num_pipeline_stages
-        )
+        self._num_pipeline_stages = [
+            replica_config.num_pipeline_stages
+            for replica_config in self._simulation_config.cluster_config.replica_configs
+        ]
 
+        # Check if using DistributionShiftRequestLengthGenerator
+        self._is_distribution_shift = (
+            hasattr(self._simulation_config.request_generator_config, "type") and
+            self._simulation_config.request_generator_config.type == RequestLengthGeneratorType.DISTRIBUTION_SHIFT
+        )
+        self._current_distribution_stage = None
+        self._distribution_stage_boundaries = None
+        if self._is_distribution_shift:
+            # Calculate distribution shift boundaries based on configuration
+            self._calculate_distribution_shift_boundaries()
+        
         # Initialise request metrics
         self._request_metrics_time_distributions: Dict[
             RequestMetricsTimeDistributions, DataSeries
@@ -73,6 +88,22 @@ class MetricsStore:
                 self._config.store_plots,
             )
 
+        # Per-stage metrics for distribution shift if applicable
+        self._per_stage_request_metrics: Dict[
+            DistributionShiftStage, Dict[RequestMetricsTimeDistributions, DataSeries]
+        ] = {}
+        if self._is_distribution_shift:
+            for stage in DistributionShiftStage:
+                self._per_stage_request_metrics[stage] = {}
+                for metric_name in RequestMetricsTimeDistributions:
+                    self._per_stage_request_metrics[stage][metric_name] = DataSeries(
+                        REQUEST_ID_STR,
+                        f"{stage.value}_{metric_name.value}",
+                        self._config.subsamples,
+                        self._config.save_table_to_wandb,
+                        self._config.store_plots,
+                    )
+
         self._token_metrics_time_distribution: Dict[
             TokenMetricsTimeDistribution, DataSeries
         ] = {}
@@ -83,6 +114,20 @@ class MetricsStore:
                 self._config.store_plots,
             )
 
+        # Per-stage token metrics for distribution shift if applicable
+        self._per_stage_token_metrics: Dict[
+            DistributionShiftStage, Dict[TokenMetricsTimeDistribution, CDFSketch]
+        ] = {}
+        if self._is_distribution_shift:
+            for stage in DistributionShiftStage:
+                self._per_stage_token_metrics[stage] = {}
+                for metric_name in TokenMetricsTimeDistribution:
+                    self._per_stage_token_metrics[stage][metric_name] = CDFSketch(
+                        f"{stage.value}_{metric_name.value}",
+                        self._config.save_table_to_wandb,
+                        self._config.store_plots,
+                    )
+
         self._request_metrics_histogram: Dict[RequestMetricsHistogram, DataSeries] = {}
         for metric_name in RequestMetricsHistogram:
             self._request_metrics_histogram[metric_name] = DataSeries(
@@ -92,6 +137,22 @@ class MetricsStore:
                 self._config.save_table_to_wandb,
                 self._config.store_plots,
             )
+
+        # Per-stage histogram metrics for distribution shift if applicable
+        self._per_stage_request_histogram: Dict[
+            DistributionShiftStage, Dict[RequestMetricsHistogram, DataSeries]
+        ] = {}
+        if self._is_distribution_shift:
+            for stage in DistributionShiftStage:
+                self._per_stage_request_histogram[stage] = {}
+                for metric_name in RequestMetricsHistogram:
+                    self._per_stage_request_histogram[stage][metric_name] = DataSeries(
+                        REQUEST_ID_STR,
+                        f"{stage.value}_{metric_name.value}",
+                        self._config.subsamples,
+                        self._config.save_table_to_wandb,
+                        self._config.store_plots,
+                    )
 
         # Initialise batch metrics
         self._batch_metrics_count_distribution: Dict[
@@ -114,6 +175,31 @@ class MetricsStore:
                 self._config.store_plots,
             )
 
+        # Per-stage batch count metrics for distribution shift if applicable
+        self._per_stage_batch_count: Dict[
+            DistributionShiftStage, Dict[BatchMetricsCountDistribution, CDFSketch]
+        ] = {}
+        self._per_stage_batch_count_per_batch: Dict[
+            DistributionShiftStage, Dict[BatchMetricsCountDistribution, DataSeries]
+        ] = {}
+        if self._is_distribution_shift:
+            for stage in DistributionShiftStage:
+                self._per_stage_batch_count[stage] = {}
+                self._per_stage_batch_count_per_batch[stage] = {}
+                for metric_name in BatchMetricsCountDistribution:
+                    self._per_stage_batch_count[stage][metric_name] = CDFSketch(
+                        f"{stage.value}_{metric_name.value}",
+                        self._config.save_table_to_wandb,
+                        self._config.store_plots,
+                    )
+                    self._per_stage_batch_count_per_batch[stage][metric_name] = DataSeries(
+                        BATCH_ID_STR,
+                        f"{stage.value}_{metric_name.value}",
+                        self._config.subsamples,
+                        self._config.save_table_to_wandb,
+                        self._config.store_plots,
+                    )
+
         self._batch_metrics_time_distribution: Dict[
             BatchMetricsTimeDistribution, CDFSketch
         ] = {}
@@ -134,6 +220,31 @@ class MetricsStore:
                 self._config.store_plots,
             )
 
+        # Per-stage batch time metrics for distribution shift if applicable
+        self._per_stage_batch_time: Dict[
+            DistributionShiftStage, Dict[BatchMetricsTimeDistribution, CDFSketch]
+        ] = {}
+        self._per_stage_batch_time_per_batch: Dict[
+            DistributionShiftStage, Dict[BatchMetricsTimeDistribution, DataSeries]
+        ] = {}
+        if self._is_distribution_shift:
+            for stage in DistributionShiftStage:
+                self._per_stage_batch_time[stage] = {}
+                self._per_stage_batch_time_per_batch[stage] = {}
+                for metric_name in BatchMetricsTimeDistribution:
+                    self._per_stage_batch_time[stage][metric_name] = CDFSketch(
+                        f"{stage.value}_{metric_name.value}",
+                        self._config.save_table_to_wandb,
+                        self._config.store_plots,
+                    )
+                    self._per_stage_batch_time_per_batch[stage][metric_name] = DataSeries(
+                        BATCH_ID_STR,
+                        f"{stage.value}_{metric_name.value}",
+                        self._config.subsamples,
+                        self._config.save_table_to_wandb,
+                        self._config.store_plots,
+                    )
+
         # Initialise completion metrics
         self._request_completion_metrics_time_series: Dict[
             RequestCompletionMetricsTimeSeries, DataSeries
@@ -146,6 +257,23 @@ class MetricsStore:
                 self._config.save_table_to_wandb,
                 self._config.store_plots,
             )
+
+        # Per-stage request completion metrics for distribution shift if applicable
+        self._per_stage_request_completion: Dict[
+            DistributionShiftStage, Dict[RequestCompletionMetricsTimeSeries, DataSeries]
+        ] = {}
+        if self._is_distribution_shift:
+            for stage in DistributionShiftStage:
+                self._per_stage_request_completion[stage] = {}
+                for metric_name in RequestCompletionMetricsTimeSeries:
+                    self._per_stage_request_completion[stage][metric_name] = DataSeries(
+                        TIME_STR,
+                        f"{stage.value}_{metric_name.value}",
+                        self._config.subsamples,
+                        self._config.save_table_to_wandb,
+                        self._config.store_plots,
+                    )
+                    
         self._token_completion_metrics_time_series: Dict[
             TokenCompletionMetricsTimeSeries, DataSeries
         ] = {}
@@ -157,6 +285,22 @@ class MetricsStore:
                 self._config.save_table_to_wandb,
                 self._config.store_plots,
             )
+
+        # Per-stage token completion metrics for distribution shift if applicable
+        self._per_stage_token_completion: Dict[
+            DistributionShiftStage, Dict[TokenCompletionMetricsTimeSeries, DataSeries]
+        ] = {}
+        if self._is_distribution_shift:
+            for stage in DistributionShiftStage:
+                self._per_stage_token_completion[stage] = {}
+                for metric_name in TokenCompletionMetricsTimeSeries:
+                    self._per_stage_token_completion[stage][metric_name] = DataSeries(
+                        TIME_STR,
+                        f"{stage.value}_{metric_name.value}",
+                        self._config.subsamples,
+                        self._config.save_table_to_wandb,
+                        self._config.store_plots,
+                    )
 
         # Initialise operation metrics
         self._operation_metrics: Dict[OperationMetrics, CDFSketch] = {}
@@ -174,6 +318,31 @@ class MetricsStore:
                 self._config.save_table_to_wandb,
                 self._config.store_plots,
             )
+
+        # Per-stage operation metrics for distribution shift if applicable
+        self._per_stage_operation_metrics: Dict[
+            DistributionShiftStage, Dict[OperationMetrics, CDFSketch]
+        ] = {}
+        self._per_stage_operation_metrics_per_batch: Dict[
+            DistributionShiftStage, Dict[OperationMetrics, DataSeries]
+        ] = {}
+        if self._is_distribution_shift:
+            for stage in DistributionShiftStage:
+                self._per_stage_operation_metrics[stage] = {}
+                self._per_stage_operation_metrics_per_batch[stage] = {}
+                for metric_name in OperationMetrics:
+                    self._per_stage_operation_metrics[stage][metric_name] = CDFSketch(
+                        f"{stage.value}_{metric_name.value}",
+                        self._config.save_table_to_wandb,
+                        self._config.store_plots,
+                    )
+                    self._per_stage_operation_metrics_per_batch[stage][metric_name] = DataSeries(
+                        BATCH_ID_STR,
+                        f"{stage.value}_{metric_name.value}",
+                        self._config.subsamples,
+                        self._config.save_table_to_wandb,
+                        self._config.store_plots,
+                    )
 
         self._cpu_operation_metrics: Dict[CpuOperationMetrics, CDFSketch] = {}
         self._cpu_operation_metrics_per_batch: Dict[CpuOperationMetrics, DataSeries] = (
@@ -193,14 +362,39 @@ class MetricsStore:
                 self._config.store_plots,
             )
 
+        # Per-stage CPU operation metrics for distribution shift if applicable
+        self._per_stage_cpu_operation_metrics: Dict[
+            DistributionShiftStage, Dict[CpuOperationMetrics, CDFSketch]
+        ] = {}
+        self._per_stage_cpu_operation_metrics_per_batch: Dict[
+            DistributionShiftStage, Dict[CpuOperationMetrics, DataSeries]
+        ] = {}
+        if self._is_distribution_shift:
+            for stage in DistributionShiftStage:
+                self._per_stage_cpu_operation_metrics[stage] = {}
+                self._per_stage_cpu_operation_metrics_per_batch[stage] = {}
+                for metric_name in CpuOperationMetrics:
+                    self._per_stage_cpu_operation_metrics[stage][metric_name] = CDFSketch(
+                        f"{stage.value}_{metric_name.value}",
+                        self._config.save_table_to_wandb,
+                        self._config.store_plots,
+                    )
+                    self._per_stage_cpu_operation_metrics_per_batch[stage][metric_name] = DataSeries(
+                        BATCH_ID_STR,
+                        f"{stage.value}_{metric_name.value}",
+                        self._config.subsamples,
+                        self._config.save_table_to_wandb,
+                        self._config.store_plots,
+                    )
+
         # per replica metrics
         self._replica_memory_usage = []
         # per replica stage metrics
         self._replica_busy_time = []
         self._replica_mfu = []
-        self._mfu_calculator = MFUCalculator(
-            self._simulation_config.cluster_config.replica_config
-        )
+        self._mfu_calculators = {}
+        for replica_idx, replica_config in enumerate(simulation_config.cluster_config.replica_configs):
+            self._mfu_calculators[replica_idx] = MFUCalculator(replica_config)
 
         for replica_idx in range(self._num_replicas):
             self._replica_memory_usage.append(
@@ -215,7 +409,7 @@ class MetricsStore:
             self._replica_busy_time.append([])
             self._replica_mfu.append([])
 
-            for stage_idx in range(self._num_pipeline_stages):
+            for stage_idx in range(self._num_pipeline_stages[replica_idx]):
                 self._replica_busy_time[replica_idx].append(
                     SeriesAverageMeter(
                         TIME_STR,
@@ -235,6 +429,47 @@ class MetricsStore:
                 self._replica_mfu[replica_idx][stage_idx].put(0, 0)
 
         self._init_wandb()
+
+    def _calculate_distribution_shift_boundaries(self) -> None:
+        """Calculate the request boundaries for distribution shift stages."""
+        if not hasattr(self._simulation_config.request_generator_config, "num_requests"):
+            # If we don't have the necessary config, don't set up distribution shift tracking
+            self._is_distribution_shift = False
+            return
+            
+        if not hasattr(self._simulation_config.request_generator_config, "distribution_shift_ratio"):
+            # If ratio isn't specified, use the default value
+            distribution_shift_ratio = 0.3
+        else:
+            distribution_shift_ratio = self._simulation_config.request_generator_config.distribution_shift_ratio
+            
+        total_requests = self._simulation_config.request_generator_config.num_requests
+        secondary_count = int(total_requests * distribution_shift_ratio)
+        primary_count = total_requests - secondary_count
+        primary_first_count = primary_count // 2
+        
+        # Store the request index ranges for each stage
+        self._distribution_stage_boundaries = {
+            DistributionShiftStage.PRIMARY_FIRST: (0, primary_first_count),
+            DistributionShiftStage.SECONDARY: (primary_first_count, primary_first_count + secondary_count),
+            DistributionShiftStage.PRIMARY_LAST: (primary_first_count + secondary_count, total_requests)
+        }
+        logger.info(f"Distribution shift stages: {self._distribution_stage_boundaries}")
+        self._current_distribution_stage = DistributionShiftStage.PRIMARY_FIRST
+
+    def _get_current_stage(self, request_id: int) -> Optional[DistributionShiftStage]:
+        """Determine the current distribution shift stage based on request ID."""
+        if not self._is_distribution_shift or self._distribution_stage_boundaries is None:
+            return None
+            
+        for stage, (start, end) in self._distribution_stage_boundaries.items():
+            if start <= request_id < end:
+                if self._current_distribution_stage != stage:
+                    logger.info(f"Transitioning to distribution shift stage: {stage.value} at request {request_id}")
+                    self._current_distribution_stage = stage
+                return stage
+                
+        return None
 
     def _init_wandb(self):
         if (
@@ -329,6 +564,37 @@ class MetricsStore:
             total_operation_runtimes,
         )
 
+        # Store per-stage operation metrics if using distribution shift
+        if self._is_distribution_shift:
+            for stage in DistributionShiftStage:
+                stage_total_operation_runtimes: Dict[str, float] = {}
+                stage_total_operation_runtimes["model_execution_e2e"] = 0
+                
+                for metric_name, dataseries in self._per_stage_operation_metrics[stage].items():
+                    dataseries.plot_cdf(
+                        base_plot_path, 
+                        f"{stage.value}_{metric_name.value}_execution_time", 
+                        TIME_STR_MS
+                    )
+                    stage_total_operation_runtimes[metric_name.value] = dataseries.sum
+                    stage_total_operation_runtimes["model_execution_e2e"] += dataseries.sum
+
+                for metric_name, dataseries in self._per_stage_cpu_operation_metrics[stage].items():
+                    dataseries.plot_cdf(
+                        base_plot_path, 
+                        f"{stage.value}_{metric_name.value}_execution_time", 
+                        TIME_STR_MS
+                    )
+                    stage_total_operation_runtimes[metric_name.value] = dataseries.sum
+
+                self._store_bar_plot(
+                    base_plot_path,
+                    f"{stage.value}_total_operation_runtimes",
+                    OPERATION_STR,
+                    TIME_STR_MS,
+                    stage_total_operation_runtimes,
+                )
+
         if not self._config.keep_individual_batch_metrics:
             return
 
@@ -366,6 +632,45 @@ class MetricsStore:
             file_name="cpu_operation_metrics",
         )
 
+        # Store per-stage per-batch operation metrics if using distribution shift
+        if self._is_distribution_shift and self._config.keep_individual_batch_metrics:
+            for stage in DistributionShiftStage:
+                for dataseries in self._per_stage_operation_metrics_per_batch[stage].values():
+                    dataseries.consolidate()
+                    dataseries.plot_step(
+                        base_plot_path,
+                        f"{stage.value}_{dataseries._metric_name}_per_batch",
+                        y_axis_label=TIME_STR_MS,
+                        y_cumsum=False,
+                    )
+                operations_dataseries_list = list(self._per_stage_operation_metrics_per_batch[stage].values())
+                if operations_dataseries_list:  # Only save if we have data
+                    self._save_as_csv(
+                        dataseries_list=operations_dataseries_list,
+                        key_to_join=BATCH_ID_STR,
+                        base_path=self._config.output_dir,
+                        file_name=f"{stage.value}_operation_metrics",
+                    )
+
+                for dataseries in self._per_stage_cpu_operation_metrics_per_batch[stage].values():
+                    dataseries.consolidate()
+                    dataseries.plot_step(
+                        base_plot_path,
+                        f"{stage.value}_{dataseries._metric_name}_per_batch",
+                        y_axis_label=TIME_STR_MS,
+                        y_cumsum=False,
+                    )
+                cpu_operations_dataseries_list = list(
+                    self._per_stage_cpu_operation_metrics_per_batch[stage].values()
+                )
+                if cpu_operations_dataseries_list:  # Only save if we have data
+                    self._save_as_csv(
+                        dataseries_list=cpu_operations_dataseries_list,
+                        key_to_join=BATCH_ID_STR,
+                        base_path=self._config.output_dir,
+                        file_name=f"{stage.value}_cpu_operation_metrics",
+                    )
+
     def _store_request_metrics(self, base_plot_path: str):
         if not self._config.store_request_metrics:
             return
@@ -387,6 +692,30 @@ class MetricsStore:
         for dataseries in self._request_metrics_time_distributions.values():
             dataseries.plot_cdf(base_plot_path, dataseries._y_name, TIME_STR)
 
+        # Store per-stage request metrics if using distribution shift
+        if self._is_distribution_shift:
+            for stage in DistributionShiftStage:
+                stage_metrics = list(
+                    self._per_stage_request_metrics[stage].values()
+                ) + list(self._per_stage_request_histogram[stage].values())
+                
+                # Only save if we have data
+                if any(len(ds._x) > 0 for ds in stage_metrics):
+                    self._save_as_csv(
+                        dataseries_list=stage_metrics,
+                        key_to_join=REQUEST_ID_STR,
+                        base_path=self._config.output_dir,
+                        file_name=f"{stage.value}_request_metrics",
+                    )
+
+                for dataseries in self._per_stage_request_histogram[stage].values():
+                    if len(dataseries._x) > 0:  # Only plot if we have data
+                        dataseries.plot_histogram(base_plot_path, f"{stage.value}_{dataseries._y_name}")
+
+                for dataseries in self._per_stage_request_metrics[stage].values():
+                    if len(dataseries._x) > 0:  # Only plot if we have data
+                        dataseries.plot_cdf(base_plot_path, f"{stage.value}_{dataseries._y_name}", TIME_STR)
+
     def _store_batch_metrics(self, base_plot_path: str):
         if not self._config.store_batch_metrics:
             return
@@ -401,6 +730,20 @@ class MetricsStore:
 
         for dataseries in self._batch_metrics_count_distribution.values():
             dataseries.plot_cdf(base_plot_path, dataseries._metric_name, COUNT_STR)
+
+        # Store per-stage batch metrics if using distribution shift
+        if self._is_distribution_shift:
+            for stage in DistributionShiftStage:
+                for metric_name, dataseries in self._per_stage_batch_time[stage].items():
+                    y_axis_label = (
+                        TIME_STR_MS
+                        if "model_execution" in dataseries._metric_name
+                        else TIME_STR
+                    )
+                    dataseries.plot_cdf(base_plot_path, dataseries._metric_name, y_axis_label)
+
+                for dataseries in self._per_stage_batch_count[stage].values():
+                    dataseries.plot_cdf(base_plot_path, dataseries._metric_name, COUNT_STR)
 
         if not self._config.keep_individual_batch_metrics:
             return
@@ -437,12 +780,62 @@ class MetricsStore:
             file_name="batch_metrics",
         )
 
+        # Store per-stage per-batch metrics if using distribution shift
+        if self._is_distribution_shift and self._config.keep_individual_batch_metrics:
+            for stage in DistributionShiftStage:
+                for dataseries in self._per_stage_batch_time_per_batch[stage].values():
+                    if len(dataseries._x) == 0:
+                        continue
+                    y_axis_label = (
+                        TIME_STR_MS
+                        if "model_execution" in dataseries._metric_name
+                        else TIME_STR
+                    )
+                    dataseries.plot_step(
+                        base_plot_path,
+                        f"{stage.value}_{dataseries._metric_name}_per_batch",
+                        y_axis_label=y_axis_label,
+                        y_cumsum=False,
+                    )
+
+                for dataseries in self._per_stage_batch_count_per_batch[stage].values():
+                    if len(dataseries._x) == 0:
+                        continue
+                    dataseries.plot_step(
+                        base_plot_path,
+                        f"{stage.value}_{dataseries._metric_name}_per_batch",
+                        y_axis_label=COUNT_STR,
+                        y_cumsum=False,
+                    )
+
+                stage_batch_metrics = list(
+                    self._per_stage_batch_count_per_batch[stage].values()
+                ) + list(self._per_stage_batch_time_per_batch[stage].values())
+                
+                # Only save if we have data
+                if any(len(ds._x) > 0 for ds in stage_batch_metrics):
+                    self._save_as_csv(
+                        dataseries_list=stage_batch_metrics,
+                        key_to_join=BATCH_ID_STR,
+                        base_path=self._config.output_dir,
+                        file_name=f"{stage.value}_batch_metrics",
+                    )
+
     def _store_completion_metrics(self, base_plot_path: str):
         if self._config.store_request_metrics:
             for dataseries in self._request_completion_metrics_time_series.values():
                 dataseries.plot_step(
                     base_plot_path, f"{dataseries._y_name}_time_series", COUNT_STR
                 )
+
+            # Store per-stage completion metrics if using distribution shift
+            if self._is_distribution_shift:
+                for stage in DistributionShiftStage:
+                    for dataseries in self._per_stage_request_completion[stage].values():
+                        if len(dataseries._x) > 0:  # Only plot if we have data
+                            dataseries.plot_step(
+                                base_plot_path, f"{stage.value}_{dataseries._y_name}_time_series", COUNT_STR
+                            )
 
         if not self._config.store_token_completion_metrics:
             return
@@ -455,6 +848,18 @@ class MetricsStore:
                 base_plot_path, f"{dataseries._y_name}_time_series", COUNT_STR
             )
 
+        # Store per-stage token metrics if using distribution shift
+        if self._is_distribution_shift:
+            for stage in DistributionShiftStage:
+                for dataseries in self._per_stage_token_metrics[stage].values():
+                    dataseries.plot_cdf(base_plot_path, dataseries._metric_name, TIME_STR)
+
+                for dataseries in self._per_stage_token_completion[stage].values():
+                    if len(dataseries._x) > 0:  # Only plot if we have data
+                        dataseries.plot_step(
+                            base_plot_path, f"{stage.value}_{dataseries._y_name}_time_series", COUNT_STR
+                        )
+
     def _store_utilization_metrics(self, base_plot_path: str):
         if not self._config.store_utilization_metrics:
             return
@@ -463,7 +868,7 @@ class MetricsStore:
             self._replica_memory_usage[replica_idx].print_stats(
                 f"replica_{replica_idx + 1}_memory_usage", base_plot_path
             )
-            for stage_idx in range(self._num_pipeline_stages):
+            for stage_idx in range(self._num_pipeline_stages[replica_idx]):
                 self._replica_busy_time[replica_idx][stage_idx].print_stats(
                     f"replica_{replica_idx + 1}_stage_{stage_idx + 1}_busy_time_percent",
                     base_plot_path,
@@ -489,9 +894,18 @@ class MetricsStore:
         if not self._config.store_request_metrics:
             return
 
+        # Determine the distribution shift stage if applicable
+        current_stage = self._get_current_stage(request.id) if self._is_distribution_shift else None
+
         self._request_completion_metrics_time_series[
             RequestCompletionMetricsTimeSeries.REQUEST_ARRIVAL
         ].put(time, 1)
+
+        # Track per-stage metrics if using distribution shift
+        if current_stage is not None:
+            self._per_stage_request_completion[current_stage][
+                RequestCompletionMetricsTimeSeries.REQUEST_ARRIVAL
+            ].put(time, 1)
 
         self._request_metrics_histogram[RequestMetricsHistogram.REQUEST_NUM_TOKENS].put(
             request.id, request.total_tokens
@@ -505,10 +919,33 @@ class MetricsStore:
         self._request_metrics_histogram[RequestMetricsHistogram.REQUEST_PD_RATIO].put(
             request.id, request.pd_ratio
         )
+
+        # Track per-stage histogram metrics if using distribution shift
+        if current_stage is not None:
+            self._per_stage_request_histogram[current_stage][
+                RequestMetricsHistogram.REQUEST_NUM_TOKENS
+            ].put(request.id, request.total_tokens)
+            self._per_stage_request_histogram[current_stage][
+                RequestMetricsHistogram.REQUEST_PREFILL_TOKENS
+            ].put(request.id, request.num_prefill_tokens)
+            self._per_stage_request_histogram[current_stage][
+                RequestMetricsHistogram.REQUEST_DECODE_TOKENS
+            ].put(request.id, request.num_decode_tokens)
+            self._per_stage_request_histogram[current_stage][
+                RequestMetricsHistogram.REQUEST_PD_RATIO
+            ].put(request.id, request.pd_ratio)
+
         if self._last_request_arrived_at is not None:
             self._request_metrics_histogram[
                 RequestMetricsHistogram.REQUEST_INTER_ARRIVAL_DELAY
             ].put(request.id, request.arrived_at - self._last_request_arrived_at)
+            
+            # Track per-stage inter-arrival delay if using distribution shift
+            if current_stage is not None:
+                self._per_stage_request_histogram[current_stage][
+                    RequestMetricsHistogram.REQUEST_INTER_ARRIVAL_DELAY
+                ].put(request.id, request.arrived_at - self._last_request_arrived_at)
+                
         self._last_request_arrived_at = request.arrived_at
 
     @if_write_metrics
@@ -516,9 +953,18 @@ class MetricsStore:
         if not self._config.store_request_metrics:
             return
 
+        # Determine the distribution shift stage if applicable
+        current_stage = self._get_current_stage(request.id) if self._is_distribution_shift else None
+
         self._request_completion_metrics_time_series[
             RequestCompletionMetricsTimeSeries.REQUEST_COMPLETION
         ].put(request.completed_at, 1)
+
+        # Track per-stage metrics if using distribution shift
+        if current_stage is not None:
+            self._per_stage_request_completion[current_stage][
+                RequestCompletionMetricsTimeSeries.REQUEST_COMPLETION
+            ].put(request.completed_at, 1)
 
         self._request_metrics_time_distributions[
             RequestMetricsTimeDistributions.REQUEST_E2E_TIME
@@ -575,13 +1021,79 @@ class MetricsStore:
             / request.num_decode_tokens,
         )
 
+        # Track per-stage distributions if using distribution shift
+        if current_stage is not None:
+            self._per_stage_request_metrics[current_stage][
+                RequestMetricsTimeDistributions.REQUEST_E2E_TIME
+            ].put(request.id, request.e2e_time)
+            self._per_stage_request_metrics[current_stage][
+                RequestMetricsTimeDistributions.REQUEST_E2E_TIME_NORMALIZED
+            ].put(request.id, request.e2e_time_normalized)
+            self._per_stage_request_metrics[current_stage][
+                RequestMetricsTimeDistributions.REQUEST_EXECUTION_TIME
+            ].put(request.id, request.execution_time)
+            self._per_stage_request_metrics[current_stage][
+                RequestMetricsTimeDistributions.REQUEST_EXECUTION_TIME_NORMALIZED
+            ].put(request.id, request.execution_time_normalized)
+            self._per_stage_request_metrics[current_stage][
+                RequestMetricsTimeDistributions.REQUEST_MODEL_EXECUTION_TIME
+            ].put(request.id, request.model_execution_time)
+            self._per_stage_request_metrics[current_stage][
+                RequestMetricsTimeDistributions.REQUEST_MODEL_EXECUTION_TIME_NORMALIZED
+            ].put(request.id, request.model_execution_time_normalized)
+            self._per_stage_request_metrics[current_stage][
+                RequestMetricsTimeDistributions.REQUEST_PREEMPTION_TIME
+            ].put(request.id, request.preempted_time)
+            self._per_stage_request_metrics[current_stage][
+                RequestMetricsTimeDistributions.REQUEST_SCHEDULING_DELAY
+            ].put(request.id, request.scheduling_delay)
+            self._per_stage_request_metrics[current_stage][
+                RequestMetricsTimeDistributions.REQUEST_EXECUTION_PLUS_PREEMPTION_TIME
+            ].put(request.id, request.execution_time + request.preempted_time)
+            self._per_stage_request_metrics[current_stage][
+                RequestMetricsTimeDistributions.REQUEST_EXECUTION_PLUS_PREEMPTION_TIME_NORMALIZED
+            ].put(
+                request.id,
+                (request.execution_time + request.preempted_time)
+                / request.num_decode_tokens,
+            )
+            self._per_stage_request_metrics[current_stage][
+                RequestMetricsTimeDistributions.PREFILL_TIME_E2E
+            ].put(request.id, request.prefill_completed_at - request.arrived_at)
+            self._per_stage_request_metrics[current_stage][
+                RequestMetricsTimeDistributions.PREFILL_TIME_EXECUTION_PLUS_PREEMPTION
+            ].put(request.id, request.prefill_completed_at - request.scheduled_at)
+            self._per_stage_request_metrics[current_stage][
+                RequestMetricsTimeDistributions.PREFILL_TIME_EXECUTION_PLUS_PREEMPTION_NORMALIZED
+            ].put(
+                request.id,
+                (request.prefill_completed_at - request.scheduled_at)
+                / request.num_prefill_tokens,
+            )
+            self._per_stage_request_metrics[current_stage][
+                RequestMetricsTimeDistributions.DECODE_TIME_EXECUTION_PLUS_PREEMPTION_NORMALIZED
+            ].put(
+                request.id,
+                (request.completed_at - request.prefill_completed_at)
+                / request.num_decode_tokens,
+            )
+
         self._request_metrics_histogram[
             RequestMetricsHistogram.REQUEST_NUM_RESTARTS
         ].put(request.id, request.num_restarts)
 
+        # Track per-stage restart histogram if using distribution shift
+        if current_stage is not None:
+            self._per_stage_request_histogram[current_stage][
+                RequestMetricsHistogram.REQUEST_NUM_RESTARTS
+            ].put(request.id, request.num_restarts)
+
     def _update_per_token_execution_times(
         self, time: float, request: Request, batch: Batch
     ) -> None:
+        # Determine the distribution shift stage if applicable
+        current_stage = self._get_current_stage(request.id) if self._is_distribution_shift else None
+
         # if prefill has just finished in this iteration, update the prefill completion time series
         if (
             time == request.prefill_completed_at
@@ -593,6 +1105,15 @@ class MetricsStore:
                 time,
                 request.num_prefill_tokens,
             )
+            
+            # Track per-stage metrics if using distribution shift
+            if current_stage is not None:
+                self._per_stage_token_completion[current_stage][
+                    TokenCompletionMetricsTimeSeries.PREFILL_COMPLETIONS
+                ].put(
+                    time,
+                    request.num_prefill_tokens,
+                )
 
         # determine if this was prefill or decode token
         if not request.has_started_decode:
@@ -601,35 +1122,65 @@ class MetricsStore:
         if not self._config.store_token_completion_metrics:
             return
 
+        token_execution_time = time - batch.scheduled_at + request.latest_iteration_scheduling_delay
+        
         self._token_metrics_time_distribution[
             TokenMetricsTimeDistribution.DECODE_TOKEN_EXECUTION_PLUS_PREMPTION_TIME
-        ].put(
-            time - batch.scheduled_at + request.latest_iteration_scheduling_delay,
-        )
+        ].put(token_execution_time)
+
+        # Track per-stage token metrics if using distribution shift
+        if current_stage is not None:
+            self._per_stage_token_metrics[current_stage][
+                TokenMetricsTimeDistribution.DECODE_TOKEN_EXECUTION_PLUS_PREMPTION_TIME
+            ].put(token_execution_time)
 
         self._token_completion_metrics_time_series[
             TokenCompletionMetricsTimeSeries.DECODE_COMPLETIONS
         ].put(time, 1)
 
+        # Track per-stage token completion metrics if using distribution shift
+        if current_stage is not None:
+            self._per_stage_token_completion[current_stage][
+                TokenCompletionMetricsTimeSeries.DECODE_COMPLETIONS
+            ].put(time, 1)
+
     def _push_metric(
-        self, metric_name: OperationMetrics, batch_id: int, value: float
+        self, metric_name: OperationMetrics, batch_id: int, value: float, 
+        stage: Optional[DistributionShiftStage] = None
     ) -> None:
+        # Push to the regular metrics
         if metric_name in OperationMetrics:
             self._operation_metrics[metric_name].put(value)
             self._operation_metrics_per_batch[metric_name].put(batch_id, value)
+            # Push to per-stage metrics if applicable
+            if stage is not None and self._is_distribution_shift:
+                self._per_stage_operation_metrics[stage][metric_name].put(value)
+                self._per_stage_operation_metrics_per_batch[stage][metric_name].put(batch_id, value)
         elif metric_name in CpuOperationMetrics:
             self._cpu_operation_metrics[metric_name].put(value)
             self._cpu_operation_metrics_per_batch[metric_name].put(batch_id, value)
+            # Push to per-stage metrics if applicable
+            if stage is not None and self._is_distribution_shift:
+                self._per_stage_cpu_operation_metrics[stage][metric_name].put(value)
+                self._per_stage_cpu_operation_metrics_per_batch[stage][metric_name].put(batch_id, value)
         elif metric_name in BatchMetricsTimeDistribution:
             self._batch_metrics_time_distribution[metric_name].put(value)
             self._batch_metrics_time_distribution_per_batch[metric_name].put(
                 batch_id, value
             )
+            # Push to per-stage metrics if applicable
+            if stage is not None and self._is_distribution_shift:
+                self._per_stage_batch_time[stage][metric_name].put(value)
+                self._per_stage_batch_time_per_batch[stage][metric_name].put(batch_id, value)
         elif metric_name in BatchMetricsCountDistribution:
             self._batch_metrics_count_distribution[metric_name].put(value)
             self._batch_metrics_count_distribution_per_batch[metric_name].put(
                 batch_id, value
             )
+            # Push to per-stage metrics if applicable
+            if stage is not None and self._is_distribution_shift:
+                self._per_stage_batch_count[stage][metric_name].put(value)
+                self._per_stage_batch_count_per_batch[stage][metric_name].put(batch_id, value)
         else:
             raise ValueError(f"Invalid metric name {metric_name}")
 
@@ -641,6 +1192,12 @@ class MetricsStore:
             self._config.min_batch_index and batch.id < self._config.min_batch_index
         ) or (self._config.max_batch_index and batch.id > self._config.max_batch_index):
             return
+
+        # Determine the current distribution shift stage if applicable
+        # For batches, use the first request's stage
+        current_stage = None
+        if self._is_distribution_shift and batch.requests:
+            current_stage = self._get_current_stage(batch.requests[0].id)
 
         for request in batch.completed_requests:
             self._on_request_end(time, request)
@@ -658,24 +1215,29 @@ class MetricsStore:
             BatchMetricsTimeDistribution.BATCH_EXECUTION_TIME,
             batch.id,
             time - batch.scheduled_at,
+            current_stage,
         )
         self._push_metric(
             BatchMetricsCountDistribution.BATCH_NUM_TOKENS,
             batch.id,
             batch.total_num_tokens,
+            current_stage,
         )
         self._push_metric(
             BatchMetricsCountDistribution.BATCH_NUM_PREFILL_TOKENS,
             batch.id,
             batch.num_prefill_tokens,
+            current_stage,
         )
         self._push_metric(
             BatchMetricsCountDistribution.BATCH_NUM_DECODE_TOKENS,
             batch.id,
             batch.num_decode_tokens,
+            current_stage,
         )
         self._push_metric(
-            BatchMetricsCountDistribution.BATCH_SIZE, batch.id, batch.size
+            BatchMetricsCountDistribution.BATCH_SIZE, batch.id, batch.size,
+            current_stage,
         )
 
     @if_write_metrics
@@ -699,8 +1261,21 @@ class MetricsStore:
         if not self._config.store_utilization_metrics:
             return
 
+        # Determine the current distribution shift stage if applicable
+        current_stage = None
+        if self._is_distribution_shift:
+            batch_id = batch_stage._batch_id
+            # Try to find the first request's ID from the batch
+            for replica in self._simulation_config.cluster_config.replicas:
+                if replica.id == replica_id:
+                    for batch in replica.batches:
+                        if batch.id == batch_id and batch.requests:
+                            current_stage = self._get_current_stage(batch.requests[0].id)
+                            break
+                    break
+
         self._replica_busy_time[replica_id - 1][stage_id - 1].put(time, 100)
-        mfu = self._mfu_calculator.get_mfu(batch_stage)
+        mfu = self._mfu_calculators[replica_id].get_mfu(batch_stage)
         self._replica_mfu[replica_id - 1][stage_id - 1].put(time, mfu)
 
         if not self._config.store_operation_metrics:
@@ -712,36 +1287,43 @@ class MetricsStore:
                 OperationMetrics.MLP_UP_PROJ,
                 batch_id,
                 execution_time.mlp_layer_up_proj_execution_time,
+                current_stage,
             )
             self._push_metric(
                 OperationMetrics.MLP_ACTIVATION,
                 batch_id,
                 execution_time.mlp_layer_act_execution_time,
+                current_stage,
             )
             self._push_metric(
                 OperationMetrics.MLP_DOWN_PROJ,
                 batch_id,
                 execution_time.mlp_layer_down_proj_execution_time,
+                current_stage,
             )
             self._push_metric(
                 OperationMetrics.MLP_DOWN_PROJ_ALL_REDUCE,
                 batch_id,
                 execution_time.mlp_all_reduce_time,
+                current_stage,
             )
             self._push_metric(
                 OperationMetrics.ATTN_PRE_PROJ,
                 batch_id,
                 execution_time.attention_pre_proj_time,
+                current_stage,
             )
             self._push_metric(
                 OperationMetrics.ATTN_POST_PROJ,
                 batch_id,
                 execution_time.attention_post_proj_time,
+                current_stage,
             )
             self._push_metric(
                 OperationMetrics.ATTN_POST_PROJ_ALL_REDUCE,
                 batch_id,
                 execution_time.attention_all_reduce_time,
+                current_stage,
             )
 
             if execution_time.attention_prefill_execution_time != 0:
@@ -749,6 +1331,7 @@ class MetricsStore:
                     OperationMetrics.ATTN_PREFILL,
                     batch_id,
                     execution_time.attention_prefill_execution_time,
+                    current_stage,
                 )
 
             if execution_time.attention_decode_execution_time != 0:
@@ -756,59 +1339,72 @@ class MetricsStore:
                     OperationMetrics.ATTN_DECODE,
                     batch_id,
                     execution_time.attention_decode_execution_time,
+                    current_stage,
                 )
             self._push_metric(
                 OperationMetrics.ATTN_KV_CACHE_SAVE,
                 batch_id,
                 execution_time.attention_kv_cache_save_execution_time,
+                current_stage,
             )
             self._push_metric(
                 OperationMetrics.ATTN_ROPE,
                 batch_id,
                 execution_time.attention_rope_execution_time,
+                current_stage,
             )
             self._push_metric(
-                OperationMetrics.ADD, batch_id, execution_time.add_time * 2
+                OperationMetrics.ADD, batch_id, execution_time.add_time * 2,
+                current_stage,
             )
             self._push_metric(
                 OperationMetrics.INPUT_LAYERNORM,
                 batch_id,
                 execution_time.attn_norm_time,
+                current_stage,
             )
             self._push_metric(
                 OperationMetrics.POST_ATTENTION_LAYERNORM,
                 batch_id,
                 execution_time.mlp_norm_time,
+                current_stage,
             )
 
         self._push_metric(
             OperationMetrics.PIPELINE_SEND_RECV,
             batch_id,
             execution_time.pipeline_parallel_communication_time,
+            current_stage,
         )
         self._push_metric(
-            CpuOperationMetrics.SCHEDULE, batch_id, execution_time.schedule_time
+            CpuOperationMetrics.SCHEDULE, batch_id, execution_time.schedule_time,
+            current_stage,
         )
         self._push_metric(
-            CpuOperationMetrics.SAMPLER_E2E, batch_id, execution_time.sampler_e2e_time
+            CpuOperationMetrics.SAMPLER_E2E, batch_id, execution_time.sampler_e2e_time,
+            current_stage,
         )
         self._push_metric(
             CpuOperationMetrics.PREPARE_INPUTS_E2E,
             batch_id,
             execution_time.prepare_inputs_e2e_time,
+            current_stage,
         )
         self._push_metric(
             CpuOperationMetrics.MODEL_EXECUTION_E2E,
             batch_id,
             execution_time.model_time_ms,
+            current_stage,
         )
         self._push_metric(
             CpuOperationMetrics.PROCESS_MODEL_OUTPUTS,
             batch_id,
             execution_time.process_model_outputs_time,
+            current_stage,
         )
         self._push_metric(
-            CpuOperationMetrics.RAY_COMM_TIME, batch_id, execution_time.ray_comm_time
+            CpuOperationMetrics.RAY_COMM_TIME, batch_id, execution_time.ray_comm_time,
+            current_stage,
         )
 
     @if_write_metrics
