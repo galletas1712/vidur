@@ -51,10 +51,14 @@ class RequestMetricsTimeDistributions(enum.Enum):
         "request_execution_plus_preemption_time_normalized"
     )
     PREFILL_TIME_E2E = "prefill_e2e_time"
+    PREFILL_TIME_E2E_NORMALIZED = "prefill_e2e_time_normalized"
     PREFILL_TIME_EXECUTION_PLUS_PREEMPTION = "prefill_time_execution_plus_preemption"
     PREFILL_TIME_EXECUTION_PLUS_PREEMPTION_NORMALIZED = (
         "prefill_time_execution_plus_preemption_normalized"
     )
+
+    DECODE_TIME_E2E = "decode_e2e_time"
+    DECODE_TIME_E2E_NORMALIZED = "decode_e2e_time_normalized"
     DECODE_TIME_EXECUTION_PLUS_PREEMPTION_NORMALIZED = (
         "decode_time_execution_plus_preemption_normalized"
     )
@@ -64,6 +68,7 @@ class TokenMetricsTimeDistribution(enum.Enum):
     DECODE_TOKEN_EXECUTION_PLUS_PREMPTION_TIME = (
         "decode_token_execution_plus_preemption_time"
     )
+    TIME_BETWEEN_TOKENS = "tbt"
 
 
 class RequestMetricsHistogram(enum.Enum):

@@ -138,6 +138,7 @@ class CDFSketch:
             )
 
         if self._save_plots:
+            logger.warning(f"Saving CDF plot to {path}/{plot_name}.png")
             fig = px.line(
                 df,
                 x=self._metric_name,

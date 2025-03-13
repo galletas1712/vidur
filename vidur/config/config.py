@@ -410,7 +410,7 @@ class MetricsConfig:
         metadata={"help": "Whether to store operation metrics."},
     )
     store_token_completion_metrics: bool = field(
-        default=False,
+        default=True,
         metadata={"help": "Whether to store token completion metrics."},
     )
     store_request_metrics: bool = field(

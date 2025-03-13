@@ -20,6 +20,7 @@ class Simulator:
         set_seeds(config.seed)
 
         self._config: SimulationConfig = config
+        logger.info(f"Simulation config: {self._config.to_dict()}")
 
         self._time = 0
         self._terminate = False
@@ -49,7 +50,6 @@ class Simulator:
         )
 
         self._init_event_queue()
-        atexit.register(self._write_output)
 
     @property
     def scheduler(self) -> BaseGlobalScheduler:
@@ -81,6 +81,7 @@ class Simulator:
         assert self._scheduler.is_empty() or self._terminate
 
         logger.info(f"Simulation ended at: {self._time}s")
+        self._write_output()
 
     def _write_output(self) -> None:
         logger.info("Writing output")

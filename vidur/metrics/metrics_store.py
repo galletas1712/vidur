@@ -105,7 +105,7 @@ class MetricsStore:
                     )
 
         self._token_metrics_time_distribution: Dict[
-            TokenMetricsTimeDistribution, DataSeries
+            TokenMetricsTimeDistribution, CDFSketch
         ] = {}
         for metric_name in TokenMetricsTimeDistribution:
             self._token_metrics_time_distribution[metric_name] = CDFSketch(
@@ -429,6 +429,9 @@ class MetricsStore:
                 self._replica_mfu[replica_idx][stage_idx].put(0, 0)
 
         self._init_wandb()
+        
+        # Add dictionary to track last batch completion time for each request
+        self._last_batch_completion_time: Dict[int, float] = {}
 
     def _calculate_distribution_shift_boundaries(self) -> None:
         """Calculate the request boundaries for distribution shift stages."""
@@ -1021,6 +1024,54 @@ class MetricsStore:
             / request.num_decode_tokens,
         )
 
+        # Add the new metrics
+        prefill_e2e_time = request.prefill_completed_at - request.arrived_at
+        decode_e2e_time = request.completed_at - request.prefill_completed_at
+
+        # 1. Prefill e2e time normalized
+        self._request_metrics_time_distributions[
+            RequestMetricsTimeDistributions.PREFILL_TIME_E2E_NORMALIZED
+        ].put(
+            request.id,
+            prefill_e2e_time / request.num_prefill_tokens if request.num_prefill_tokens > 0 else 0
+        )
+        
+        # 2. Decode e2e time (unnormalized)
+        self._request_metrics_time_distributions[
+            RequestMetricsTimeDistributions.DECODE_TIME_E2E
+        ].put(request.id, decode_e2e_time)
+        
+        # Decode e2e time (normalized) - using the existing field
+        self._request_metrics_time_distributions[
+            RequestMetricsTimeDistributions.DECODE_TIME_E2E_NORMALIZED
+        ].put(
+            request.id,
+            decode_e2e_time / request.num_decode_tokens if request.num_decode_tokens > 0 else 0
+        )
+
+        # Handle per-stage metrics if applicable
+        if current_stage is not None:
+            # 1. Prefill e2e time normalized
+            self._per_stage_request_metrics[current_stage][
+                RequestMetricsTimeDistributions.PREFILL_TIME_E2E_NORMALIZED
+            ].put(
+                request.id,
+                prefill_e2e_time / request.num_prefill_tokens if request.num_prefill_tokens > 0 else 0
+            )
+            
+            # 2. Decode e2e time (unnormalized)
+            self._per_stage_request_metrics[current_stage][
+                RequestMetricsTimeDistributions.DECODE_TIME_E2E
+            ].put(request.id, decode_e2e_time)
+            
+            # Decode e2e time (normalized)
+            self._per_stage_request_metrics[current_stage][
+                RequestMetricsTimeDistributions.DECODE_TIME_E2E_NORMALIZED
+            ].put(
+                request.id,
+                decode_e2e_time / request.num_decode_tokens if request.num_decode_tokens > 0 else 0
+            )
+
         # Track per-stage distributions if using distribution shift
         if current_stage is not None:
             self._per_stage_request_metrics[current_stage][
@@ -1198,9 +1249,32 @@ class MetricsStore:
         current_stage = None
         if self._is_distribution_shift and batch.requests:
             current_stage = self._get_current_stage(batch.requests[0].id)
+            
+        # Calculate time between tokens for each request in the batch
+        for request in batch.requests:
+            # Only track this for decode tokens (not prefill)
+            if request.has_started_decode:
+                if request.id in self._last_batch_completion_time:
+                    tbt = time - self._last_batch_completion_time[request.id]
+                    # 3. Time between tokens
+                    self._token_metrics_time_distribution[
+                        TokenMetricsTimeDistribution.TIME_BETWEEN_TOKENS
+                    ].put(tbt)
+                    
+                    # Per-stage time between tokens if applicable
+                    if current_stage is not None:
+                        self._per_stage_token_metrics[current_stage][
+                            TokenMetricsTimeDistribution.TIME_BETWEEN_TOKENS
+                        ].put(tbt)
+                
+                # Update the last batch completion time for this request
+                self._last_batch_completion_time[request.id] = time
 
         for request in batch.completed_requests:
             self._on_request_end(time, request)
+            # Clean up the dictionary for completed requests
+            if request.id in self._last_batch_completion_time:
+                del self._last_batch_completion_time[request.id]
 
         if self._config.store_utilization_metrics:
             self._replica_memory_usage[replica_id - 1].put(time, memory_usage_percent)
