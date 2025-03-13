@@ -1,5 +1,4 @@
 import os
-import subprocess
 import pandas as pd
 import matplotlib.pyplot as plt
 import numpy as np
@@ -35,8 +34,10 @@ def run_simulation(
     prefill_replicas,
     decode_replicas,
     hybrid_replicas,
+    chunk_size,
     output_dir,
     length_generator_type,
+    qps,
     log_file,
 ):
     """Run a single simulation with the specified replica configuration."""
@@ -49,8 +50,11 @@ def run_simulation(
             FixedRequestLengthGeneratorConfig,
             SyntheticRequestGeneratorConfig,
             UniformRequestLengthGeneratorConfig,
+            PoissonRequestIntervalGeneratorConfig,
             ClusterConfig,
             MetricsConfig,
+            VllmSchedulerConfig,
+            SarathiSchedulerConfig
         )
         from vidur.simulator import SimulationConfig, Simulator
 
@@ -72,18 +76,22 @@ def run_simulation(
         simulation_config = SimulationConfig(
             request_generator_config=SyntheticRequestGeneratorConfig(
                 length_generator_config=request_length_generator_config,
+                interval_generator_config=PoissonRequestIntervalGeneratorConfig(qps=qps)
             ),
             cluster_config=ClusterConfig(
                 num_prefill_replicas=prefill_replicas,
                 num_decode_replicas=decode_replicas,
                 num_hybrid_replicas=hybrid_replicas,
+                prefill_replica_scheduler_config=VllmSchedulerConfig(),
+                decode_replica_scheduler_config=SarathiSchedulerConfig(),
+                hybrid_replica_scheduler_config=SarathiSchedulerConfig(chunk_size=chunk_size),
             ),
             metrics_config=MetricsConfig(output_dir=output_dir),
         )
 
         print(
             f"Running simulation with {total_replicas} replicas: "
-            f"Prefill={prefill_replicas}, Decode={decode_replicas}, Hybrid={hybrid_replicas}"
+            f"Prefill={prefill_replicas}, Decode={decode_replicas}, Hybrid={hybrid_replicas}, Hybrid Chunk Size={chunk_size}"
         )
 
         simulator = Simulator(simulation_config)
@@ -143,7 +151,7 @@ def calculate_median_metric(df, metric_name):
 
 
 def plot_cdfs(
-    cdf_data_dict, metric_name, output_dir, request_length_generator_type
+    cdf_data_dict, metric_name, output_dir, request_length_generator_type, results
 ):
     """Plot CDFs from multiple configurations for a specific metric."""
     if request_length_generator_type == "shift":
@@ -212,15 +220,16 @@ def plot_cdfs(
                         color=blue_shades[j],
                     )
             
-            # Plot hybrid configuration in red
-            for label in hybrid_labels:
+            # Plot hybrid configurations in different shades of red
+            red_shades = plt.cm.Reds(np.linspace(0.5, 0.9, len(hybrid_labels)))
+            for j, label in enumerate(hybrid_labels):
                 df = stage_data_dict[label]
                 if df is not None:
                     ax.plot(
                         df[metric_name],
                         df["cdf"],
                         label=f"{label} (median: {medians[label]:.3f}s)",
-                        color="red",
+                        color=red_shades[j],
                         linewidth=2.5,
                     )
             
@@ -276,15 +285,16 @@ def plot_cdfs(
                     color=blue_shades[i],
                 )
 
-        # Plot hybrid configuration in red
-        for label in hybrid_labels:
+        # Plot hybrid configurations in different shades of red
+        red_shades = plt.cm.Reds(np.linspace(0.5, 0.9, len(hybrid_labels)))
+        for i, label in enumerate(hybrid_labels):
             df = cdf_data_dict[label]
             if df is not None:
                 plt.plot(
                     df[metric_name],
                     df["cdf"],
                     label=f"{label} (median: {medians[label]:.3f}s)",
-                    color="red",
+                    color=red_shades[i],
                     linewidth=2.5,
                 )
 
@@ -303,12 +313,12 @@ def plot_cdfs(
 
 def run_experiment_worker(config_tuple):
     """Worker function to run a single experiment configuration."""
-    prefill, decode, hybrid, base_output_dir, request_length_generator_type = (
+    prefill, decode, hybrid, chunk_size, base_output_dir, request_length_generator_type, qps = (
         config_tuple
     )
 
     # Create subdirectory for this configuration
-    config_dir = f"{base_output_dir}/prefill_{prefill}_decode_{decode}_hybrid_{hybrid}"
+    config_dir = f"{base_output_dir}/prefill_{prefill}_decode_{decode}_hybrid_{hybrid}_chunk_size_{chunk_size}"
     os.makedirs(config_dir, exist_ok=True)
 
     # Create log file path
@@ -316,13 +326,13 @@ def run_experiment_worker(config_tuple):
 
     # Run simulation
     output_dir = run_simulation(
-        prefill, decode, hybrid, config_dir, request_length_generator_type, log_file
+        prefill, decode, hybrid, chunk_size, config_dir, request_length_generator_type, qps, log_file
     )
 
     # Return configuration label and output directory for metric extraction
     if output_dir:
         if hybrid > 0:
-            label = f"Hybrid only ({hybrid})"
+            label = f"Hybrid only ({hybrid}) - chunk size {chunk_size}"
         else:
             label = f"Prefill: {prefill}, Decode: {decode}"
 
@@ -343,6 +353,13 @@ def parse_args():
         help="Total number of replicas to use (default: 4)",
     )
     parser.add_argument(
+        "--hybrid_chunked_prefill_sizes",
+        nargs="+",
+        type=int,
+        default=[32, 64, 128, 256, 512, 1024, 2048, 4096],
+        help="Chunked prefill sizes for hybrid configurations (default: [32, 64, 128, 256, 512, 1024, 2048, 4096])",
+    )
+    parser.add_argument(
         "--num_workers",
         type=int,
         default=None,
@@ -353,6 +370,12 @@ def parse_args():
         type=str,
         default="shift",
         choices=["fixed", "uniform", "shift"],
+    )
+    parser.add_argument(
+        "--qps_to_num_replica_ratio",
+        type=float,
+        default=2.0,
+        help="QPS to number of replicas ratio (default: 2.0)",
     )
     parser.add_argument(
         "--metrics",
@@ -389,32 +412,51 @@ def main():
             num_prefill,
             total_replicas - num_prefill,
             0,
+            -1,
             base_output_dir,
             request_length_generator_type,
+            int(args.qps_to_num_replica_ratio * total_replicas),
         )
         for num_prefill in range(1, total_replicas)
+    ] + [
+        (
+            0,
+            0,
+            total_replicas,
+            chunked_prefill_size,
+            base_output_dir,
+            request_length_generator_type,
+            int(args.qps_to_num_replica_ratio * total_replicas),
+        )
+        for chunked_prefill_size in args.hybrid_chunked_prefill_sizes
     ]
-    configs.append(
-        (0, 0, total_replicas, base_output_dir, request_length_generator_type)
-    )
 
     # Initialize data structure for all metrics
     all_metrics_data = {metric: {} for metric in args.metrics}
 
-    # Create a pool of workers
-    with multiprocessing.Pool(processes=args.num_workers) as pool:
+    results = []
+
+    def run(selected_configs):
         # Map the worker function to the configurations
-        global results
-        results = pool.map(run_experiment_worker, configs)
+        curr_results = pool.map(run_experiment_worker, selected_configs)
+        results.extend(curr_results)
 
         # Extract metrics for each configuration
-        for label, output_dir in results:
+        for label, output_dir in curr_results:
             if label is not None and output_dir is not None:
                 for metric in args.metrics:
                     if request_length_generator_type != "shift":
                         cdf = extract_metric_cdf(output_dir, metric)
                         if cdf is not None:
                             all_metrics_data[metric][label] = cdf
+
+    if args.num_workers is None:
+        with multiprocessing.Pool(processes=args.num_workers) as pool:
+            run(configs)
+    else:
+        for i in range((len(configs) + args.num_workers - 1) // args.num_workers):
+            with multiprocessing.Pool(processes=args.num_workers) as pool:
+                run(configs[i * args.num_workers : (i + 1) * args.num_workers])
 
     # Plot comparison of CDFs for each metric
     for metric in args.metrics:
@@ -424,6 +466,7 @@ def main():
                 metric,
                 base_output_dir,
                 request_length_generator_type,
+                results
             )
 
     print(f"Experiment complete. Results saved in {base_output_dir}")
