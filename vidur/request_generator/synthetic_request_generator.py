@@ -42,6 +42,9 @@ class SyntheticRequestGenerator(BaseRequestGenerator):
 
         if prefill_tokens is None or decode_tokens is None:
             return None
+        
+        assert prefill_tokens >= 0, f"prefill_tokens: {prefill_tokens}"
+        assert decode_tokens >= 0,  f"decode_tokens: {decode_tokens}"
 
         return Request(
             arrived_at=arrived_at,

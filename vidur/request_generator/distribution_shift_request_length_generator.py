@@ -28,18 +28,20 @@ class DistributionShiftRequestLengthGenerator(BaseRequestLengthGenerator):
         self.primary_trace_file = getattr(config, "primary_trace_file", "data/processed_traces/splitwise_conv.csv")
         self.stage2secondary_trace_file = getattr(config, "stage2secondary_trace_file", "data/processed_traces/splitwise_code.csv")
         self.distribution_shift_ratio = getattr(config, "distribution_shift_ratio", 0.3)
-        self.prefill_scale_factor = getattr(config, "prefill_scale_factor", 1.0)
-        self.decode_scale_factor = getattr(config, "decode_scale_factor", 1.0)
+        self.primary_prefill_scale_factor = getattr(config, "prefill_scale_factor", 1.0)
+        self.primary_decode_scale_factor = getattr(config, "decode_scale_factor", 1.0)
+        self.stage2secondary_prefill_scale_factor = getattr(config, "stage2secondary_prefill_scale_factor", 1.0)
+        self.stage2secondary_decode_scale_factor = getattr(config, "stage2secondary_decode_scale_factor", 1.0)
         
         # Load primary trace
         logger.info(f"Loading primary trace file: {self.primary_trace_file}")
         self.primary_trace_df = pd.read_csv(self.primary_trace_file)
-        self._preprocess_trace_df(self.primary_trace_df, "primary")
+        self._preprocess_trace_df(self.primary_trace_df, "primary", self.primary_prefill_scale_factor, self.primary_decode_scale_factor)
         
         # Load stage2secondary trace
         logger.info(f"Loading stage2secondary trace file: {self.stage2secondary_trace_file}")
         self.stage2secondary_trace_df = pd.read_csv(self.stage2secondary_trace_file)
-        self._preprocess_trace_df(self.stage2secondary_trace_df, "stage2secondary")
+        self._preprocess_trace_df(self.stage2secondary_trace_df, "stage2secondary", self.stage2secondary_prefill_scale_factor, self.stage2secondary_decode_scale_factor)
 
         # Set random seed
         np.random.seed(config.seed)
@@ -48,14 +50,14 @@ class DistributionShiftRequestLengthGenerator(BaseRequestLengthGenerator):
         # Prepare the data for distribution shift pattern
         self._prepare_data()
         
-    def _preprocess_trace_df(self, df: pd.DataFrame, trace_name: str):
+    def _preprocess_trace_df(self, df: pd.DataFrame, trace_name: str, prefill_scale_factor: float, decode_scale_factor: float):
         """Process and validate the dataframe, applying scaling factors."""
         # Scale prefill and decode tokens
         df["num_prefill_tokens"] = (
-            df["num_prefill_tokens"] * self.prefill_scale_factor
+            df["num_prefill_tokens"] * prefill_scale_factor
         )
         df["num_decode_tokens"] = (
-            df["num_decode_tokens"] * self.decode_scale_factor
+            df["num_decode_tokens"] * decode_scale_factor
         )
 
         # Make sure all the prefill and decode counts are integers
@@ -66,11 +68,27 @@ class DistributionShiftRequestLengthGenerator(BaseRequestLengthGenerator):
         df["num_prefill_tokens"] = df["num_prefill_tokens"].clip(lower=1)
         df["num_decode_tokens"] = df["num_decode_tokens"].clip(lower=1)
 
-        # Make sure the total does not exceed the max tokens, adjust the prefill tokens if needed
+        # Identify samples exceeding max_tokens
         total_tokens = df["num_prefill_tokens"] + df["num_decode_tokens"]
-        diff_tokens = total_tokens - self.config.max_tokens
-        diff_tokens = diff_tokens.clip(lower=0)
-        df["num_prefill_tokens"] = df["num_prefill_tokens"] - diff_tokens
+        excess_mask = total_tokens > self.config.max_tokens
+        
+        # For samples exceeding max_tokens, rescale proportionally
+        if excess_mask.any():
+            # Calculate new token counts based on original proportions
+            total_tokens_excess = df.loc[excess_mask, "num_prefill_tokens"] + df.loc[excess_mask, "num_decode_tokens"]
+            df.loc[excess_mask, "num_prefill_tokens"] = (df.loc[excess_mask, "num_prefill_tokens"] * self.config.max_tokens / total_tokens_excess).astype(int)
+            df.loc[excess_mask, "num_decode_tokens"] = (df.loc[excess_mask, "num_decode_tokens"] * self.config.max_tokens / total_tokens_excess).astype(int)
+            
+            # Ensure minimum values after rescaling
+            min_mask = df["num_prefill_tokens"] < 1
+            if min_mask.any():
+                df.loc[min_mask, "num_prefill_tokens"] = 1
+                df.loc[min_mask, "num_decode_tokens"] = self.config.max_tokens - 1
+                
+            min_mask = df["num_decode_tokens"] < 1
+            if min_mask.any():
+                df.loc[min_mask, "num_decode_tokens"] = 1
+                df.loc[min_mask, "num_prefill_tokens"] = self.config.max_tokens - 1
 
         assert all(
             df["num_prefill_tokens"] + df["num_decode_tokens"]
@@ -80,7 +98,7 @@ class DistributionShiftRequestLengthGenerator(BaseRequestLengthGenerator):
         logger.info(
             f"Processed {trace_name} trace with {len(df)} requests"
         )
-    
+
     def _prepare_data(self):
         """
         Prepare the data for distribution shift pattern.

@@ -50,18 +50,17 @@ class RequestMetricsTimeDistributions(enum.Enum):
     REQUEST_EXECUTION_PLUS_PREEMPTION_TIME_NORMALIZED = (
         "request_execution_plus_preemption_time_normalized"
     )
-    PREFILL_TIME_E2E = "prefill_e2e_time"
+    PREFILL_TIME_E2E = "prefill_e2e_time"  # NOTE: This is *with* scheduling delay from arrival to scheduled
     PREFILL_TIME_E2E_NORMALIZED = "prefill_e2e_time_normalized"
-    PREFILL_TIME_EXECUTION_PLUS_PREEMPTION = "prefill_time_execution_plus_preemption"
-    PREFILL_TIME_EXECUTION_PLUS_PREEMPTION_NORMALIZED = (
-        "prefill_time_execution_plus_preemption_normalized"
+    PREFILL_TIME_E2E_NO_SCHEDULING_DELAY = "prefill_e2e_time_no_scheduling_delay"  # NOTE: This includes just model execution and preemption
+    PREFILL_TIME_E2E_NO_SCHEDULING_DELAY_NORMALIZED = (
+        "prefill_e2e_time_no_scheduling_delay_normalized"
     )
 
     DECODE_TIME_E2E = "decode_e2e_time"
     DECODE_TIME_E2E_NORMALIZED = "decode_e2e_time_normalized"
-    DECODE_TIME_EXECUTION_PLUS_PREEMPTION_NORMALIZED = (
-        "decode_time_execution_plus_preemption_normalized"
-    )
+
+    PREFILL_DECODE_WAITING_TIME = "prefill_decode_waiting_time"
 
 
 class TokenMetricsTimeDistribution(enum.Enum):

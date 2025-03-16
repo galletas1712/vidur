@@ -33,24 +33,32 @@ class Request(BaseEntity):
         num_decode_tokens: int,
         num_processed_tokens: int,
     ):
+        assert arrived_at >= 0, f"Arrival time is negative: {arrived_at}"
+        assert num_prefill_tokens >= 0, f"Number of prefill tokens is negative: {num_prefill_tokens}"
+        assert num_decode_tokens >= 0, f"Number of decode tokens is negative: {num_decode_tokens}"
+        assert num_processed_tokens >= 0, f"Number of processed tokens is negative: {num_processed_tokens}"
+
         self._id = Request.generate_id()
         self._arrived_at = arrived_at
         self._num_prefill_tokens = num_prefill_tokens
         self._num_decode_tokens = num_decode_tokens
         self._num_processed_tokens = num_processed_tokens
 
-        self._scheduled_at = 0
         self._execution_time = 0
         self._model_execution_time = 0
-        self._scheduling_delay = 0
         self._preempted_time = 0
-        self._completed_at = 0
-        self._prefill_completed_at = 0
-        self._latest_stage_scheduled_at = 0
-        self._latest_stage_completed_at = 0
-        self._latest_iteration_scheduled_at = 0
-        self._latest_iteration_completed_at = 0
-        self._latest_iteration_scheduling_delay = 0
+
+        self._scheduled_at = None
+        self._scheduling_delay = None
+        self._completed_at = None
+        self._prefill_completed_at = None
+        self._latest_stage_scheduled_at = None
+        self._latest_stage_completed_at = None
+        self._latest_iteration_scheduled_at = None
+        self._latest_iteration_completed_at = None
+        self._latest_iteration_scheduling_delay = None
+
+        self._prefill_decode_waiting_time = None
 
         self._scheduled = False
         self._preempted = False
@@ -92,6 +100,11 @@ class Request(BaseEntity):
     @check_scheduled
     def latest_iteration_scheduling_delay(self) -> float:
         return self._latest_iteration_scheduling_delay
+
+    @property
+    @check_scheduled
+    def prefill_decode_waiting_time(self) -> float:
+        return self._prefill_decode_waiting_time
 
     @property
     @check_scheduled
@@ -211,8 +224,10 @@ class Request(BaseEntity):
         time: float,
     ) -> None:
         self._latest_iteration_scheduled_at = time
-        self._latest_iteration_scheduling_delay = (
-            time - self._latest_iteration_completed_at
+        self._latest_iteration_scheduling_delay = time - (
+            self._latest_iteration_completed_at
+            if self._latest_iteration_completed_at
+            else 0
         )
 
         if self._scheduled:
@@ -231,6 +246,9 @@ class Request(BaseEntity):
         time: float,
         num_tokens_processed: int,
     ) -> None:
+        assert time >= 0, f"Time is negative: {time}"
+        assert num_tokens_processed >= 0, f"Number of tokens processed is negative: {num_tokens_processed}"
+
         self._num_processed_tokens += num_tokens_processed
         self._latest_iteration_completed_at = time
 
@@ -238,8 +256,11 @@ class Request(BaseEntity):
             # we must record the prefill completion time only in the first time
             # in the subsequent restarts, we keep adding the previously decoded
             # tokens to the prefill tokens - that is irrelevant to the original prefill
-            if self._prefill_completed_at == 0:
-                self._prefill_completed_at = time
+            assert not self._prefill_completed_at
+            self._prefill_completed_at = time
+        
+        if self.has_started_decode:
+            assert self._prefill_completed_at, f"Prefill completed at {self._prefill_completed_at}"
 
         # check if request is completed
         if self._num_processed_tokens == self.total_tokens:
@@ -252,10 +273,18 @@ class Request(BaseEntity):
         time: float,
     ) -> None:
         self._latest_stage_scheduled_at = time
-        if self._latest_stage_completed_at == 0:
+        if not self._latest_stage_completed_at:
             self._preempted_time = 0
         else:
             self._preempted_time += time - self._latest_stage_completed_at
+        
+        # Set prefill decode waiting time as the time between prefill completion and decode start in the first stage
+        if self.just_finished_prefill and not self._prefill_decode_waiting_time:
+            self._prefill_decode_waiting_time = time - self._prefill_completed_at
+            assert self._prefill_decode_waiting_time >= 0, f"Prefill decode waiting time is negative: {self._prefill_decode_waiting_time}"
+            assert self._latest_stage_completed_at == self._latest_iteration_completed_at, f"Latest stage completed at {self._latest_stage_completed_at} and latest iteration completed at {self._latest_iteration_completed_at}"
+            assert self._prefill_completed_at == self._latest_iteration_completed_at, f"Prefill completed at {self._prefill_completed_at} and latest iteration completed at {self._latest_iteration_completed_at}"
+
         self._preempted = False
 
     def on_batch_stage_end(

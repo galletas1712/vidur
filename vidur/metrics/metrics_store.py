@@ -24,6 +24,7 @@ from vidur.metrics.constants import (
 )
 from vidur.metrics.data_series import DataSeries
 from vidur.metrics.series_average_meter import SeriesAverageMeter
+from vidur.types.request_generator_type import RequestGeneratorType
 from vidur.types.request_length_generator_type import RequestLengthGeneratorType
 from vidur.utils.mfu_calculator import MFUCalculator
 
@@ -434,19 +435,15 @@ class MetricsStore:
 
     def _calculate_distribution_shift_boundaries(self) -> None:
         """Calculate the request boundaries for distribution shift stages."""
-        if not hasattr(self._simulation_config.request_generator_config, "num_requests"):
-            # If we don't have the necessary config, don't set up distribution shift tracking
+        if (
+            self._simulation_config.request_generator_config.get_type() != RequestGeneratorType.SYNTHETIC or 
+            self._simulation_config.request_generator_config.length_generator_config.get_type() != RequestLengthGeneratorType.DISTRIBUTION_SHIFT
+        ):
             self._is_distribution_shift = False
             return
             
-        if not hasattr(self._simulation_config.request_generator_config, "distribution_shift_ratio"):
-            # If ratio isn't specified, use the default value
-            distribution_shift_ratio = 0.3
-        else:
-            distribution_shift_ratio = self._simulation_config.request_generator_config.distribution_shift_ratio
-            
         total_requests = self._simulation_config.request_generator_config.num_requests
-        stage2secondary_count = int(total_requests * distribution_shift_ratio)
+        stage2secondary_count = int(total_requests * self._simulation_config.request_generator_config.length_generator_config.distribution_shift_ratio)
         primary_count = total_requests - stage2secondary_count
         stage1primary_count = primary_count // 2
         
@@ -458,7 +455,7 @@ class MetricsStore:
         }
         logger.info(f"Distribution shift stages: {self._distribution_stage_boundaries}")
 
-    def _get_current_stage(self, request_id: int) -> Optional[DistributionShiftStage]:
+    def _get_request_stage(self, request_id: int) -> Optional[DistributionShiftStage]:
         """Determine the current distribution shift stage based on request ID."""
         if not self._is_distribution_shift or self._distribution_stage_boundaries is None:
             return None
@@ -897,7 +894,7 @@ class MetricsStore:
             return
 
         # Determine the distribution shift stage if applicable
-        current_stage = self._get_current_stage(request.id) if self._is_distribution_shift else None
+        current_stage = self._get_request_stage(request.id) if self._is_distribution_shift else None
 
         self._request_completion_metrics_time_series[
             RequestCompletionMetricsTimeSeries.REQUEST_ARRIVAL
@@ -956,199 +953,62 @@ class MetricsStore:
             return
 
         # Determine the distribution shift stage if applicable
-        current_stage = self._get_current_stage(request.id) if self._is_distribution_shift else None
+        current_stage = self._get_request_stage(request.id) if self._is_distribution_shift else None
 
         self._request_completion_metrics_time_series[
             RequestCompletionMetricsTimeSeries.REQUEST_COMPLETION
         ].put(request.completed_at, 1)
+        self._request_metrics_histogram[
+            RequestMetricsHistogram.REQUEST_NUM_RESTARTS
+        ].put(request.id, request.num_restarts)
 
         # Track per-stage metrics if using distribution shift
         if current_stage is not None:
             self._per_stage_request_completion[current_stage][
                 RequestCompletionMetricsTimeSeries.REQUEST_COMPLETION
             ].put(request.completed_at, 1)
-
-        self._request_metrics_time_distributions[
-            RequestMetricsTimeDistributions.REQUEST_E2E_TIME
-        ].put(request.id, request.e2e_time)
-        self._request_metrics_time_distributions[
-            RequestMetricsTimeDistributions.REQUEST_E2E_TIME_NORMALIZED
-        ].put(request.id, request.e2e_time_normalized)
-        self._request_metrics_time_distributions[
-            RequestMetricsTimeDistributions.REQUEST_EXECUTION_TIME
-        ].put(request.id, request.execution_time)
-        self._request_metrics_time_distributions[
-            RequestMetricsTimeDistributions.REQUEST_EXECUTION_TIME_NORMALIZED
-        ].put(request.id, request.execution_time_normalized)
-        self._request_metrics_time_distributions[
-            RequestMetricsTimeDistributions.REQUEST_MODEL_EXECUTION_TIME
-        ].put(request.id, request.model_execution_time)
-        self._request_metrics_time_distributions[
-            RequestMetricsTimeDistributions.REQUEST_MODEL_EXECUTION_TIME_NORMALIZED
-        ].put(request.id, request.model_execution_time_normalized)
-        self._request_metrics_time_distributions[
-            RequestMetricsTimeDistributions.REQUEST_PREEMPTION_TIME
-        ].put(request.id, request.preempted_time)
-        self._request_metrics_time_distributions[
-            RequestMetricsTimeDistributions.REQUEST_SCHEDULING_DELAY
-        ].put(request.id, request.scheduling_delay)
-        self._request_metrics_time_distributions[
-            RequestMetricsTimeDistributions.REQUEST_EXECUTION_PLUS_PREEMPTION_TIME
-        ].put(request.id, request.execution_time + request.preempted_time)
-        self._request_metrics_time_distributions[
-            RequestMetricsTimeDistributions.REQUEST_EXECUTION_PLUS_PREEMPTION_TIME_NORMALIZED
-        ].put(
-            request.id,
-            (request.execution_time + request.preempted_time)
-            / request.num_decode_tokens,
-        )
-        self._request_metrics_time_distributions[
-            RequestMetricsTimeDistributions.PREFILL_TIME_E2E
-        ].put(request.id, request.prefill_completed_at - request.arrived_at)
-        self._request_metrics_time_distributions[
-            RequestMetricsTimeDistributions.PREFILL_TIME_EXECUTION_PLUS_PREEMPTION
-        ].put(request.id, request.prefill_completed_at - request.scheduled_at)
-        self._request_metrics_time_distributions[
-            RequestMetricsTimeDistributions.PREFILL_TIME_EXECUTION_PLUS_PREEMPTION_NORMALIZED
-        ].put(
-            request.id,
-            (request.prefill_completed_at - request.scheduled_at)
-            / request.num_prefill_tokens,
-        )
-        self._request_metrics_time_distributions[
-            RequestMetricsTimeDistributions.DECODE_TIME_EXECUTION_PLUS_PREEMPTION_NORMALIZED
-        ].put(
-            request.id,
-            (request.completed_at - request.prefill_completed_at)
-            / request.num_decode_tokens,
-        )
-
-        # Add the new metrics
-        prefill_e2e_time = request.prefill_completed_at - request.arrived_at
-        decode_e2e_time = request.completed_at - request.prefill_completed_at
-
-        # 1. Prefill e2e time normalized
-        self._request_metrics_time_distributions[
-            RequestMetricsTimeDistributions.PREFILL_TIME_E2E_NORMALIZED
-        ].put(
-            request.id,
-            prefill_e2e_time / request.num_prefill_tokens if request.num_prefill_tokens > 0 else 0
-        )
-        
-        # 2. Decode e2e time (unnormalized)
-        self._request_metrics_time_distributions[
-            RequestMetricsTimeDistributions.DECODE_TIME_E2E
-        ].put(request.id, decode_e2e_time)
-        
-        # Decode e2e time (normalized) - using the existing field
-        self._request_metrics_time_distributions[
-            RequestMetricsTimeDistributions.DECODE_TIME_E2E_NORMALIZED
-        ].put(
-            request.id,
-            decode_e2e_time / request.num_decode_tokens if request.num_decode_tokens > 0 else 0
-        )
-
-        # Handle per-stage metrics if applicable
-        if current_stage is not None:
-            # 1. Prefill e2e time normalized
-            self._per_stage_request_metrics[current_stage][
-                RequestMetricsTimeDistributions.PREFILL_TIME_E2E_NORMALIZED
-            ].put(
-                request.id,
-                prefill_e2e_time / request.num_prefill_tokens if request.num_prefill_tokens > 0 else 0
-            )
-            
-            # 2. Decode e2e time (unnormalized)
-            self._per_stage_request_metrics[current_stage][
-                RequestMetricsTimeDistributions.DECODE_TIME_E2E
-            ].put(request.id, decode_e2e_time)
-            
-            # Decode e2e time (normalized)
-            self._per_stage_request_metrics[current_stage][
-                RequestMetricsTimeDistributions.DECODE_TIME_E2E_NORMALIZED
-            ].put(
-                request.id,
-                decode_e2e_time / request.num_decode_tokens if request.num_decode_tokens > 0 else 0
-            )
-
-        # Track per-stage distributions if using distribution shift
-        if current_stage is not None:
-            self._per_stage_request_metrics[current_stage][
-                RequestMetricsTimeDistributions.REQUEST_E2E_TIME
-            ].put(request.id, request.e2e_time)
-            self._per_stage_request_metrics[current_stage][
-                RequestMetricsTimeDistributions.REQUEST_E2E_TIME_NORMALIZED
-            ].put(request.id, request.e2e_time_normalized)
-            self._per_stage_request_metrics[current_stage][
-                RequestMetricsTimeDistributions.REQUEST_EXECUTION_TIME
-            ].put(request.id, request.execution_time)
-            self._per_stage_request_metrics[current_stage][
-                RequestMetricsTimeDistributions.REQUEST_EXECUTION_TIME_NORMALIZED
-            ].put(request.id, request.execution_time_normalized)
-            self._per_stage_request_metrics[current_stage][
-                RequestMetricsTimeDistributions.REQUEST_MODEL_EXECUTION_TIME
-            ].put(request.id, request.model_execution_time)
-            self._per_stage_request_metrics[current_stage][
-                RequestMetricsTimeDistributions.REQUEST_MODEL_EXECUTION_TIME_NORMALIZED
-            ].put(request.id, request.model_execution_time_normalized)
-            self._per_stage_request_metrics[current_stage][
-                RequestMetricsTimeDistributions.REQUEST_PREEMPTION_TIME
-            ].put(request.id, request.preempted_time)
-            self._per_stage_request_metrics[current_stage][
-                RequestMetricsTimeDistributions.REQUEST_SCHEDULING_DELAY
-            ].put(request.id, request.scheduling_delay)
-            self._per_stage_request_metrics[current_stage][
-                RequestMetricsTimeDistributions.REQUEST_EXECUTION_PLUS_PREEMPTION_TIME
-            ].put(request.id, request.execution_time + request.preempted_time)
-            self._per_stage_request_metrics[current_stage][
-                RequestMetricsTimeDistributions.REQUEST_EXECUTION_PLUS_PREEMPTION_TIME_NORMALIZED
-            ].put(
-                request.id,
-                (request.execution_time + request.preempted_time)
-                / request.num_decode_tokens,
-            )
-            self._per_stage_request_metrics[current_stage][
-                RequestMetricsTimeDistributions.PREFILL_TIME_E2E
-            ].put(request.id, request.prefill_completed_at - request.arrived_at)
-            self._per_stage_request_metrics[current_stage][
-                RequestMetricsTimeDistributions.PREFILL_TIME_EXECUTION_PLUS_PREEMPTION
-            ].put(request.id, request.prefill_completed_at - request.scheduled_at)
-            self._per_stage_request_metrics[current_stage][
-                RequestMetricsTimeDistributions.PREFILL_TIME_EXECUTION_PLUS_PREEMPTION_NORMALIZED
-            ].put(
-                request.id,
-                (request.prefill_completed_at - request.scheduled_at)
-                / request.num_prefill_tokens,
-            )
-            self._per_stage_request_metrics[current_stage][
-                RequestMetricsTimeDistributions.DECODE_TIME_EXECUTION_PLUS_PREEMPTION_NORMALIZED
-            ].put(
-                request.id,
-                (request.completed_at - request.prefill_completed_at)
-                / request.num_decode_tokens,
-            )
-
-        self._request_metrics_histogram[
-            RequestMetricsHistogram.REQUEST_NUM_RESTARTS
-        ].put(request.id, request.num_restarts)
-
-        # Track per-stage restart histogram if using distribution shift
-        if current_stage is not None:
             self._per_stage_request_histogram[current_stage][
                 RequestMetricsHistogram.REQUEST_NUM_RESTARTS
             ].put(request.id, request.num_restarts)
 
+        curr_request_metrics_time_distributions = {
+            RequestMetricsTimeDistributions.REQUEST_E2E_TIME: request.e2e_time,
+            RequestMetricsTimeDistributions.REQUEST_E2E_TIME_NORMALIZED: request.e2e_time_normalized,
+            RequestMetricsTimeDistributions.REQUEST_EXECUTION_TIME: request.execution_time,
+            RequestMetricsTimeDistributions.REQUEST_EXECUTION_TIME_NORMALIZED: request.execution_time_normalized,
+            RequestMetricsTimeDistributions.REQUEST_MODEL_EXECUTION_TIME: request.model_execution_time,
+            RequestMetricsTimeDistributions.REQUEST_MODEL_EXECUTION_TIME_NORMALIZED: request.model_execution_time_normalized,
+            RequestMetricsTimeDistributions.REQUEST_PREEMPTION_TIME: request.preempted_time,
+            RequestMetricsTimeDistributions.REQUEST_SCHEDULING_DELAY: request.scheduling_delay,
+            RequestMetricsTimeDistributions.REQUEST_EXECUTION_PLUS_PREEMPTION_TIME: request.execution_time + request.preempted_time,
+            RequestMetricsTimeDistributions.REQUEST_EXECUTION_PLUS_PREEMPTION_TIME_NORMALIZED: (request.execution_time + request.preempted_time) / request.num_decode_tokens,
+            RequestMetricsTimeDistributions.PREFILL_TIME_E2E: request.prefill_completed_at - request.arrived_at,
+            RequestMetricsTimeDistributions.PREFILL_TIME_E2E_NORMALIZED: (request.prefill_completed_at - request.arrived_at) / request.num_prefill_tokens,
+            RequestMetricsTimeDistributions.PREFILL_TIME_E2E_NO_SCHEDULING_DELAY: request.prefill_completed_at - request.scheduled_at,
+            RequestMetricsTimeDistributions.PREFILL_TIME_E2E_NO_SCHEDULING_DELAY_NORMALIZED: (request.prefill_completed_at - request.scheduled_at) / request.num_prefill_tokens,
+            RequestMetricsTimeDistributions.DECODE_TIME_E2E: (request.completed_at - request.prefill_completed_at) / request.num_decode_tokens,
+            RequestMetricsTimeDistributions.DECODE_TIME_E2E_NORMALIZED: (request.completed_at - request.prefill_completed_at) / request.num_decode_tokens,
+            RequestMetricsTimeDistributions.PREFILL_DECODE_WAITING_TIME: request.prefill_decode_waiting_time
+        }
+
+        for metric_name, value in curr_request_metrics_time_distributions.items():
+            self._request_metrics_time_distributions[metric_name].put(request.id, value)
+        
+        if current_stage is not None:
+            for metric_name, value in curr_request_metrics_time_distributions.items():
+                self._per_stage_request_metrics[current_stage][metric_name].put(request.id, value)
+
     def _update_per_token_execution_times(
         self, time: float, request: Request, batch: Batch
     ) -> None:
+        if not self._config.store_token_completion_metrics:
+            return
+
         # Determine the distribution shift stage if applicable
-        current_stage = self._get_current_stage(request.id) if self._is_distribution_shift else None
+        current_stage = self._get_request_stage(request.id) if self._is_distribution_shift else None
 
         # if prefill has just finished in this iteration, update the prefill completion time series
-        if (
-            time == request.prefill_completed_at
-            and self._config.store_token_completion_metrics
-        ):
+        if request.just_finished_prefill:
             self._token_completion_metrics_time_series[
                 TokenCompletionMetricsTimeSeries.PREFILL_COMPLETIONS
             ].put(
@@ -1169,68 +1029,44 @@ class MetricsStore:
         if not request.has_started_decode:
             return
 
-        if not self._config.store_token_completion_metrics:
-            return
-
         token_execution_time = time - batch.scheduled_at + request.latest_iteration_scheduling_delay
         
+        self._token_completion_metrics_time_series[
+            TokenCompletionMetricsTimeSeries.DECODE_COMPLETIONS
+        ].put(time, 1)
         self._token_metrics_time_distribution[
             TokenMetricsTimeDistribution.DECODE_TOKEN_EXECUTION_PLUS_PREMPTION_TIME
         ].put(token_execution_time)
 
         # Track per-stage token metrics if using distribution shift
         if current_stage is not None:
+            self._per_stage_token_completion[current_stage][
+                TokenCompletionMetricsTimeSeries.DECODE_COMPLETIONS
+            ].put(time, 1)
             self._per_stage_token_metrics[current_stage][
                 TokenMetricsTimeDistribution.DECODE_TOKEN_EXECUTION_PLUS_PREMPTION_TIME
             ].put(token_execution_time)
 
-        self._token_completion_metrics_time_series[
-            TokenCompletionMetricsTimeSeries.DECODE_COMPLETIONS
-        ].put(time, 1)
-
-        # Track per-stage token completion metrics if using distribution shift
-        if current_stage is not None:
-            self._per_stage_token_completion[current_stage][
-                TokenCompletionMetricsTimeSeries.DECODE_COMPLETIONS
-            ].put(time, 1)
-
     def _push_metric(
         self, metric_name: OperationMetrics, batch_id: int, value: float, 
-        stage: Optional[DistributionShiftStage] = None
     ) -> None:
         # Push to the regular metrics
         if metric_name in OperationMetrics:
             self._operation_metrics[metric_name].put(value)
             self._operation_metrics_per_batch[metric_name].put(batch_id, value)
-            # Push to per-stage metrics if applicable
-            if stage is not None and self._is_distribution_shift:
-                self._per_stage_operation_metrics[stage][metric_name].put(value)
-                self._per_stage_operation_metrics_per_batch[stage][metric_name].put(batch_id, value)
         elif metric_name in CpuOperationMetrics:
             self._cpu_operation_metrics[metric_name].put(value)
             self._cpu_operation_metrics_per_batch[metric_name].put(batch_id, value)
-            # Push to per-stage metrics if applicable
-            if stage is not None and self._is_distribution_shift:
-                self._per_stage_cpu_operation_metrics[stage][metric_name].put(value)
-                self._per_stage_cpu_operation_metrics_per_batch[stage][metric_name].put(batch_id, value)
         elif metric_name in BatchMetricsTimeDistribution:
             self._batch_metrics_time_distribution[metric_name].put(value)
             self._batch_metrics_time_distribution_per_batch[metric_name].put(
                 batch_id, value
             )
-            # Push to per-stage metrics if applicable
-            if stage is not None and self._is_distribution_shift:
-                self._per_stage_batch_time[stage][metric_name].put(value)
-                self._per_stage_batch_time_per_batch[stage][metric_name].put(batch_id, value)
         elif metric_name in BatchMetricsCountDistribution:
             self._batch_metrics_count_distribution[metric_name].put(value)
             self._batch_metrics_count_distribution_per_batch[metric_name].put(
                 batch_id, value
             )
-            # Push to per-stage metrics if applicable
-            if stage is not None and self._is_distribution_shift:
-                self._per_stage_batch_count[stage][metric_name].put(value)
-                self._per_stage_batch_count_per_batch[stage][metric_name].put(batch_id, value)
         else:
             raise ValueError(f"Invalid metric name {metric_name}")
 
@@ -1243,24 +1079,22 @@ class MetricsStore:
         ) or (self._config.max_batch_index and batch.id > self._config.max_batch_index):
             return
 
-        # Determine the current distribution shift stage if applicable
-        # For batches, use the first request's stage
-        current_stage = None
-        if self._is_distribution_shift and batch.requests:
-            current_stage = self._get_current_stage(batch.requests[0].id)
-            
         # Calculate time between tokens for each request in the batch
         for request in batch.requests:
             # Only track this for decode tokens (not prefill)
             if request.has_started_decode:
                 if request.id in self._last_batch_completion_time:
                     tbt = time - self._last_batch_completion_time[request.id]
+                    token_execution_time = time - batch.scheduled_at + request.latest_iteration_scheduling_delay
+                    assert tbt == token_execution_time, f"Time between tokens {tbt} != token execution time {token_execution_time}"
+
                     # 3. Time between tokens
                     self._token_metrics_time_distribution[
                         TokenMetricsTimeDistribution.TIME_BETWEEN_TOKENS
                     ].put(tbt)
                     
                     # Per-stage time between tokens if applicable
+                    current_stage = self._get_request_stage(request.id)
                     if current_stage is not None:
                         self._per_stage_token_metrics[current_stage][
                             TokenMetricsTimeDistribution.TIME_BETWEEN_TOKENS
@@ -1288,29 +1122,24 @@ class MetricsStore:
             BatchMetricsTimeDistribution.BATCH_EXECUTION_TIME,
             batch.id,
             time - batch.scheduled_at,
-            current_stage,
         )
         self._push_metric(
             BatchMetricsCountDistribution.BATCH_NUM_TOKENS,
             batch.id,
             batch.total_num_tokens,
-            current_stage,
         )
         self._push_metric(
             BatchMetricsCountDistribution.BATCH_NUM_PREFILL_TOKENS,
             batch.id,
             batch.num_prefill_tokens,
-            current_stage,
         )
         self._push_metric(
             BatchMetricsCountDistribution.BATCH_NUM_DECODE_TOKENS,
             batch.id,
             batch.num_decode_tokens,
-            current_stage,
         )
         self._push_metric(
             BatchMetricsCountDistribution.BATCH_SIZE, batch.id, batch.size,
-            current_stage,
         )
 
     @if_write_metrics
@@ -1344,108 +1173,43 @@ class MetricsStore:
 
         batch_id = batch_stage._batch_id
         for _ in range(execution_time.num_layers):
-            self._push_metric(
-                OperationMetrics.MLP_UP_PROJ,
-                batch_id,
-                execution_time.mlp_layer_up_proj_execution_time,
-            )
-            self._push_metric(
-                OperationMetrics.MLP_ACTIVATION,
-                batch_id,
-                execution_time.mlp_layer_act_execution_time,
-            )
-            self._push_metric(
-                OperationMetrics.MLP_DOWN_PROJ,
-                batch_id,
-                execution_time.mlp_layer_down_proj_execution_time,
-            )
-            self._push_metric(
-                OperationMetrics.MLP_DOWN_PROJ_ALL_REDUCE,
-                batch_id,
-                execution_time.mlp_all_reduce_time,
-            )
-            self._push_metric(
-                OperationMetrics.ATTN_PRE_PROJ,
-                batch_id,
-                execution_time.attention_pre_proj_time,
-            )
-            self._push_metric(
-                OperationMetrics.ATTN_POST_PROJ,
-                batch_id,
-                execution_time.attention_post_proj_time,
-            )
-            self._push_metric(
-                OperationMetrics.ATTN_POST_PROJ_ALL_REDUCE,
-                batch_id,
-                execution_time.attention_all_reduce_time,
-            )
+            layerwise_metrics_dict = {
+                OperationMetrics.MLP_UP_PROJ: execution_time.mlp_layer_up_proj_execution_time,
+                OperationMetrics.MLP_ACTIVATION: execution_time.mlp_layer_act_execution_time,
+                OperationMetrics.MLP_DOWN_PROJ: execution_time.mlp_layer_down_proj_execution_time,
+                OperationMetrics.MLP_DOWN_PROJ_ALL_REDUCE: execution_time.mlp_all_reduce_time,
+                OperationMetrics.ATTN_PRE_PROJ: execution_time.attention_pre_proj_time,
+                OperationMetrics.ATTN_POST_PROJ: execution_time.attention_post_proj_time,
+                OperationMetrics.ATTN_POST_PROJ_ALL_REDUCE: execution_time.attention_all_reduce_time,
+                OperationMetrics.ATTN_PREFILL: execution_time.attention_prefill_execution_time,
+                OperationMetrics.ATTN_DECODE: execution_time.attention_decode_execution_time,
+                OperationMetrics.ATTN_KV_CACHE_SAVE: execution_time.attention_kv_cache_save_execution_time,
+                OperationMetrics.ATTN_ROPE: execution_time.attention_rope_execution_time,
+                OperationMetrics.ADD: execution_time.add_time * 2,
+                OperationMetrics.INPUT_LAYERNORM: execution_time.attn_norm_time,
+                OperationMetrics.POST_ATTENTION_LAYERNORM: execution_time.mlp_norm_time,
+            }
 
-            if execution_time.attention_prefill_execution_time != 0:
-                self._push_metric(
-                    OperationMetrics.ATTN_PREFILL,
-                    batch_id,
-                    execution_time.attention_prefill_execution_time,
-                )
+            for metric_name, value in layerwise_metrics_dict.items():
+                if (
+                    (metric_name == OperationMetrics.ATTN_PREFILL and value == 0) or
+                    (metric_name == OperationMetrics.ATTN_DECODE and value == 0)
+                ):
+                    continue
+                self._push_metric(metric_name, batch_id, value)
+        
+        batchwise_metrics_dict = {
+            OperationMetrics.PIPELINE_SEND_RECV: execution_time.pipeline_parallel_communication_time,
+            CpuOperationMetrics.SCHEDULE: execution_time.schedule_time,
+            CpuOperationMetrics.SAMPLER_E2E: execution_time.sampler_e2e_time,
+            CpuOperationMetrics.PREPARE_INPUTS_E2E: execution_time.prepare_inputs_e2e_time,
+            CpuOperationMetrics.MODEL_EXECUTION_E2E: execution_time.model_time_ms,
+            CpuOperationMetrics.PROCESS_MODEL_OUTPUTS: execution_time.process_model_outputs_time,
+            CpuOperationMetrics.RAY_COMM_TIME: execution_time.ray_comm_time,
+        }
 
-            if execution_time.attention_decode_execution_time != 0:
-                self._push_metric(
-                    OperationMetrics.ATTN_DECODE,
-                    batch_id,
-                    execution_time.attention_decode_execution_time,
-                )
-            self._push_metric(
-                OperationMetrics.ATTN_KV_CACHE_SAVE,
-                batch_id,
-                execution_time.attention_kv_cache_save_execution_time,
-            )
-            self._push_metric(
-                OperationMetrics.ATTN_ROPE,
-                batch_id,
-                execution_time.attention_rope_execution_time,
-            )
-            self._push_metric(
-                OperationMetrics.ADD, batch_id, execution_time.add_time * 2,
-            )
-            self._push_metric(
-                OperationMetrics.INPUT_LAYERNORM,
-                batch_id,
-                execution_time.attn_norm_time,
-            )
-            self._push_metric(
-                OperationMetrics.POST_ATTENTION_LAYERNORM,
-                batch_id,
-                execution_time.mlp_norm_time,
-            )
-
-        self._push_metric(
-            OperationMetrics.PIPELINE_SEND_RECV,
-            batch_id,
-            execution_time.pipeline_parallel_communication_time,
-        )
-        self._push_metric(
-            CpuOperationMetrics.SCHEDULE, batch_id, execution_time.schedule_time,
-        )
-        self._push_metric(
-            CpuOperationMetrics.SAMPLER_E2E, batch_id, execution_time.sampler_e2e_time,
-        )
-        self._push_metric(
-            CpuOperationMetrics.PREPARE_INPUTS_E2E,
-            batch_id,
-            execution_time.prepare_inputs_e2e_time,
-        )
-        self._push_metric(
-            CpuOperationMetrics.MODEL_EXECUTION_E2E,
-            batch_id,
-            execution_time.model_time_ms,
-        )
-        self._push_metric(
-            CpuOperationMetrics.PROCESS_MODEL_OUTPUTS,
-            batch_id,
-            execution_time.process_model_outputs_time,
-        )
-        self._push_metric(
-            CpuOperationMetrics.RAY_COMM_TIME, batch_id, execution_time.ray_comm_time,
-        )
+        for metric_name, value in batchwise_metrics_dict.items():
+            self._push_metric(metric_name, batch_id, value)
 
     @if_write_metrics
     def on_batch_stage_end(

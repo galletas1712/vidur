@@ -41,7 +41,7 @@ class BaseRequestLengthGeneratorConfig(BasePolyConfig):
         metadata={"help": "Seed for the random number generator."},
     )
     max_tokens: int = field(
-        default=4096,
+        default=16384,
         metadata={"help": "Maximum tokens."},
     )
 
@@ -198,7 +198,7 @@ class DistributionShiftRequestLengthGeneratorConfig(BaseRequestLengthGeneratorCo
         metadata={"help": "Path to the primary trace file."},
     )
     stage2secondary_trace_file: str = field(
-        default="data/processed_traces/splitwise_code.csv",
+        default="data/processed_traces/splitwise_conv.csv",
         metadata={"help": "Path to the secondary trace file to shift to."},
     )
     distribution_shift_ratio: float = field(
@@ -209,13 +209,21 @@ class DistributionShiftRequestLengthGeneratorConfig(BaseRequestLengthGeneratorCo
         default=1024,
         metadata={"help": "Number of requests for Distribution Shift Request Length Generator."},
     )
-    prefill_scale_factor: float = field(
+    primary_prefill_scale_factor: float = field(
         default=2.0,
-        metadata={"help": "Prefill scale factor for both traces."},
+        metadata={"help": "Prefill scale factor for primary trace."},
     )
-    decode_scale_factor: float = field(
-        default=2.0,
-        metadata={"help": "Decode scale factor for both traces."},
+    primary_decode_scale_factor: float = field(
+        default=1.0,
+        metadata={"help": "Decode scale factor for primary trace."},
+    )
+    stage2secondary_prefill_scale_factor: float = field(
+        default=1.0,
+        metadata={"help": "Prefill scale factor for secondary trace."},
+    )
+    stage2secondary_decode_scale_factor: float = field(
+        default=8.0,
+        metadata={"help": "Decode scale factor for secondary trace."},
     )
 
     @staticmethod
@@ -276,7 +284,7 @@ class TraceRequestGeneratorConfig(BaseRequestGeneratorConfig):
         metadata={"help": "Time scale factor for the trace request generator."},
     )
     max_tokens: int = field(
-        default=4096,
+        default=16384,
         metadata={"help": "Maximum tokens for the trace request generator."},
     )
 
@@ -308,7 +316,7 @@ class BaseReplicaSchedulerConfig(BasePolyConfig):
 @dataclass
 class VllmSchedulerConfig(BaseReplicaSchedulerConfig):
     max_tokens_in_batch: int = field(
-        default=4096,
+        default=16384,
         metadata={"help": "Maximum tokens in batch for vLLM."},
     )
 
@@ -320,7 +328,7 @@ class VllmSchedulerConfig(BaseReplicaSchedulerConfig):
 @dataclass
 class LightllmSchedulerConfig(BaseReplicaSchedulerConfig):
     max_tokens_in_batch: int = field(
-        default=4096,
+        default=16384,
         metadata={"help": "Maximum tokens in batch for LightLLM."},
     )
     max_waiting_iters: int = field(
@@ -595,15 +603,15 @@ class BaseExecutionTimePredictorConfig(BasePolyConfig):
         metadata={"help": "KV cache prediction granularity."},
     )
     prediction_max_prefill_chunk_size: int = field(
-        default=4096,
+        default=16384,
         metadata={"help": "Max prefill chunk size for prediction."},
     )
     prediction_max_batch_size: int = field(
-        default=128,
+        default=512,
         metadata={"help": "Max batch size for prediction."},
     )
     prediction_max_tokens_per_request: int = field(
-        default=4096,
+        default=16384,
         metadata={"help": "Max tokens per request for prediction."},
     )
     attention_decode_batching_overhead_fraction: float = field(

@@ -191,45 +191,56 @@ def plot_cdfs(
                         stage_data_dict[label] = df
             
             # Calculate medians for this stage
+            # First, get all unique labels across all stages
+            all_labels = list(stage_data_dict.keys())
+            hybrid_labels = [label for label in all_labels if "Hybrid" in label]
+            non_hybrid_labels = [label for label in all_labels if "Hybrid" not in label]
+            
+            # Generate consistent color schemes for all configurations
+            blue_color_map = plt.cm.Blues(np.linspace(0.5, 0.9, max(len(non_hybrid_labels), 1)))
+            red_color_map = plt.cm.Reds(np.linspace(0.5, 0.9, max(len(hybrid_labels), 1)))
+            
+            # Create color dictionaries for consistent colors
+            non_hybrid_colors = {label: blue_color_map[i] for i, label in enumerate(non_hybrid_labels)}
+            hybrid_colors = {label: red_color_map[i] for i, label in enumerate(hybrid_labels)}
+            
+            # Calculate medians for this stage
             medians = {}
             for label, df in stage_data_dict.items():
                 if df is not None:
                     medians[label] = calculate_median_metric(df, metric_name)
             
-            # Separate hybrid from non-hybrid configurations
-            hybrid_labels = [label for label in stage_data_dict.keys() if "Hybrid" in label]
-            non_hybrid_labels = [label for label in stage_data_dict.keys() if "Hybrid" not in label]
-            
-            # Sort non-hybrid configurations by median and take top 5
+            # Sort and filter for display
             sorted_non_hybrid = sorted(
                 non_hybrid_labels, key=lambda label: medians.get(label, float("inf"))
             )
             top_5_non_hybrid = sorted_non_hybrid[:5]
             
-            # Generate blue shades for non-hybrid configs
-            blue_shades = plt.cm.Blues(np.linspace(0.5, 0.9, len(top_5_non_hybrid)))
+            sorted_hybrid = sorted(
+                hybrid_labels, key=lambda label: medians.get(label, float("inf"))
+            )
+            top_3_hybrid = sorted_hybrid[:3]
             
-            # Plot top 5 non-hybrid configurations in blue shades
-            for j, label in enumerate(top_5_non_hybrid):
+            # Plot top 5 non-hybrid configurations with consistent colors
+            for label in top_5_non_hybrid:
                 df = stage_data_dict[label]
                 if df is not None:
                     ax.plot(
                         df[metric_name],
                         df["cdf"],
                         label=f"{label} (median: {medians[label]:.3f}s)",
-                        color=blue_shades[j],
+                        color=non_hybrid_colors[label],
                     )
             
-            # Plot hybrid configurations in different shades of red
-            red_shades = plt.cm.Reds(np.linspace(0.5, 0.9, len(hybrid_labels)))
-            for j, label in enumerate(hybrid_labels):
+            # Plot top 3 hybrid configurations with consistent colors
+            for label in top_3_hybrid:
                 df = stage_data_dict[label]
                 if df is not None:
                     ax.plot(
                         df[metric_name],
                         df["cdf"],
                         label=f"{label} (median: {medians[label]:.3f}s)",
-                        color=red_shades[j],
+                        color=hybrid_colors[label],
                         linewidth=2.5,
                     )
             
@@ -271,6 +282,12 @@ def plot_cdfs(
         )
         top_5_non_hybrid = sorted_non_hybrid[:5]
 
+        # Sort hybrid configurations by median and take top 3
+        sorted_hybrid = sorted(
+            hybrid_labels, key=lambda label: medians.get(label, float("inf"))
+        )
+        top_3_hybrid = sorted_hybrid[:3]
+
         # Generate blue shades for non-hybrid configs
         blue_shades = plt.cm.Blues(np.linspace(0.5, 0.9, len(top_5_non_hybrid)))
 
@@ -285,9 +302,9 @@ def plot_cdfs(
                     color=blue_shades[i],
                 )
 
-        # Plot hybrid configurations in different shades of red
-        red_shades = plt.cm.Reds(np.linspace(0.5, 0.9, len(hybrid_labels)))
-        for i, label in enumerate(hybrid_labels):
+        # Plot hybrid configurations in different shades of red (only top 3)
+        red_shades = plt.cm.Reds(np.linspace(0.5, 0.9, len(top_3_hybrid)))
+        for i, label in enumerate(top_3_hybrid):
             df = cdf_data_dict[label]
             if df is not None:
                 plt.plot(
@@ -407,6 +424,7 @@ def main():
     # Each tuple is (prefill_replicas, decode_replicas, hybrid_replicas)
     total_replicas = args.total_replicas
     request_length_generator_type = args.request_length_generator_type
+    
     configs = [
         (
             num_prefill,
