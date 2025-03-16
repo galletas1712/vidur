@@ -1086,7 +1086,7 @@ class MetricsStore:
                 if request.id in self._last_batch_completion_time:
                     tbt = time - self._last_batch_completion_time[request.id]
                     token_execution_time = time - batch.scheduled_at + request.latest_iteration_scheduling_delay
-                    assert tbt == token_execution_time, f"Time between tokens {tbt} != token execution time {token_execution_time}"
+                    assert abs(tbt - token_execution_time) < 1e-6, f"Time between tokens {tbt} != token execution time {token_execution_time}"
 
                     # 3. Time between tokens
                     self._token_metrics_time_distribution[
