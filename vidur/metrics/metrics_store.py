@@ -981,13 +981,13 @@ class MetricsStore:
             RequestMetricsTimeDistributions.REQUEST_PREEMPTION_TIME: request.preempted_time,
             RequestMetricsTimeDistributions.REQUEST_SCHEDULING_DELAY: request.scheduling_delay,
             RequestMetricsTimeDistributions.REQUEST_EXECUTION_PLUS_PREEMPTION_TIME: request.execution_time + request.preempted_time,
-            RequestMetricsTimeDistributions.REQUEST_EXECUTION_PLUS_PREEMPTION_TIME_NORMALIZED: (request.execution_time + request.preempted_time) / request.num_decode_tokens,
+            RequestMetricsTimeDistributions.REQUEST_EXECUTION_PLUS_PREEMPTION_TIME_NORMALIZED: (request.execution_time + request.preempted_time) / request.num_decode_tokens * 1e3,
             RequestMetricsTimeDistributions.PREFILL_TIME_E2E: request.prefill_completed_at - request.arrived_at,
-            RequestMetricsTimeDistributions.PREFILL_TIME_E2E_NORMALIZED: (request.prefill_completed_at - request.arrived_at) / request.num_prefill_tokens,
+            RequestMetricsTimeDistributions.PREFILL_TIME_E2E_NORMALIZED: (request.prefill_completed_at - request.arrived_at) / request.num_prefill_tokens * 1e3,
             RequestMetricsTimeDistributions.PREFILL_TIME_E2E_NO_SCHEDULING_DELAY: request.prefill_completed_at - request.scheduled_at,
-            RequestMetricsTimeDistributions.PREFILL_TIME_E2E_NO_SCHEDULING_DELAY_NORMALIZED: (request.prefill_completed_at - request.scheduled_at) / request.num_prefill_tokens,
-            RequestMetricsTimeDistributions.DECODE_TIME_E2E: (request.completed_at - request.prefill_completed_at) / request.num_decode_tokens,
-            RequestMetricsTimeDistributions.DECODE_TIME_E2E_NORMALIZED: (request.completed_at - request.prefill_completed_at) / request.num_decode_tokens,
+            RequestMetricsTimeDistributions.PREFILL_TIME_E2E_NO_SCHEDULING_DELAY_NORMALIZED: (request.prefill_completed_at - request.scheduled_at) / request.num_prefill_tokens * 1e3,
+            RequestMetricsTimeDistributions.DECODE_TIME_E2E: request.completed_at - request.prefill_completed_at,
+            RequestMetricsTimeDistributions.DECODE_TIME_E2E_NORMALIZED: (request.completed_at - request.prefill_completed_at) / request.num_decode_tokens * 1e3,
             RequestMetricsTimeDistributions.PREFILL_DECODE_WAITING_TIME: request.prefill_decode_waiting_time
         }
 
