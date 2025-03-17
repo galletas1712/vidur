@@ -8,6 +8,8 @@ import argparse
 import multiprocessing
 import sys
 
+from vidur.config.config import TraceRequestLengthGeneratorConfig
+
 
 class Redirect:
     """Context manager for redirecting stdout/stderr to a file."""
@@ -66,6 +68,22 @@ def run_simulation(
         elif length_generator_type == "shift":
             request_length_generator_config = (
                 DistributionShiftRequestLengthGeneratorConfig()
+            )
+        elif length_generator_type == "trace_prefill_heavy":
+            request_length_generator_config = (
+                TraceRequestLengthGeneratorConfig(
+                    trace_file="data/processed_traces/splitwise_conv.csv",
+                    prefill_scale_factor=4.0,
+                    decode_scale_factor=0.5,
+                )
+            )
+        elif length_generator_type == "trace_decode_heavy":
+            request_length_generator_config = (
+                TraceRequestLengthGeneratorConfig(
+                    trace_file="data/processed_traces/openr1_openthoughts_114k_code.csv",
+                    prefill_scale_factor=1.0,
+                    decode_scale_factor=0.5,
+                )
             )
         else:
             assert (
@@ -192,7 +210,7 @@ def plot_cdfs(
             
             # Calculate medians for this stage
             # First, get all unique labels across all stages
-            all_labels = list(stage_data_dict.keys())
+            all_labels = sorted(list(stage_data_dict.keys()))
             hybrid_labels = [label for label in all_labels if "Hybrid" in label]
             non_hybrid_labels = [label for label in all_labels if "Hybrid" not in label]
             
@@ -385,14 +403,13 @@ def parse_args():
     parser.add_argument(
         "--request_length_generator_type",
         type=str,
-        default="shift",
-        choices=["fixed", "uniform", "shift"],
+        default="trace_decode_heavy",
+        choices=["fixed", "uniform", "shift", "trace_prefill_heavy", "trace_decode_heavy"],
     )
     parser.add_argument(
         "--qps_to_num_replica_ratio",
         type=float,
-        default=2.0,
-        help="QPS to number of replicas ratio (default: 2.0)",
+        help="QPS to number of replicas ratio (should be 0.5 for decode heavy, 2.0 for everything else)",
     )
     parser.add_argument(
         "--metrics",
