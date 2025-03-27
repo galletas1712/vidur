@@ -20,14 +20,14 @@ class BaseGlobalScheduler(ABC):
         self._num_replicas = len(self._replicas)
         
         # Create maps of replica IDs by type for quick access
-        self._prefill_capable_replicas = {
+        self._prefill_capable_replicas = [
             replica_id for replica_id, replica in replicas.items() 
             if replica.can_handle_prefill
-        }
-        self._decode_capable_replicas = {
+        ]
+        self._decode_capable_replicas = [
             replica_id for replica_id, replica in replicas.items() 
             if replica.can_handle_decode
-        }
+        ]
         
         # Print out information about replica types
         logger.info(f"Prefill-capable replicas: {self._prefill_capable_replicas}")

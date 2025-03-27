@@ -72,6 +72,10 @@ class BaseReplicaScheduler(ABC):
     @property
     def num_pending_requests(self) -> int:
         return len(self._request_queue)
+    
+    @property
+    def num_allocated_requests(self) -> int:
+        return len(self._allocation_map)
 
     @property
     def replica_id(self) -> int:
@@ -182,7 +186,8 @@ class BaseReplicaScheduler(ABC):
         requests_to_migrate = []
 
         for request in batch.requests:
-            if request.completed or (not self.can_handle_decode and request.just_finished_prefill):
+            # NOTE: This will transfer KV caches to different replicas even under hybrid, since we assume communication cost is negligible (for now)
+            if request.completed or request.just_finished_prefill:
                 if request.completed:
                     logger.debug(f"Request {request.id} completed at replica {self._replica_id}: processed {request.num_processed_tokens}, prefill {request.num_prefill_tokens}, decode {request.num_decode_tokens}. Removing...")
                 else:

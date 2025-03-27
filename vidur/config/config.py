@@ -326,42 +326,14 @@ class VllmSchedulerConfig(BaseReplicaSchedulerConfig):
 
 
 @dataclass
-class LightllmSchedulerConfig(BaseReplicaSchedulerConfig):
-    max_tokens_in_batch: int = field(
-        default=16384,
-        metadata={"help": "Maximum tokens in batch for LightLLM."},
-    )
-    max_waiting_iters: int = field(
-        default=10,
-        metadata={"help": "Maximum waiting iterations for LightLLM."},
-    )
-
-    @staticmethod
-    def get_type():
-        return ReplicaSchedulerType.LIGHTLLM
-
-
-@dataclass
-class OrcaSchedulerConfig(BaseReplicaSchedulerConfig):
-
-    @staticmethod
-    def get_type():
-        return ReplicaSchedulerType.ORCA
-
-
-@dataclass
-class FasterTransformerSchedulerConfig(BaseReplicaSchedulerConfig):
-
-    @staticmethod
-    def get_type():
-        return ReplicaSchedulerType.FASTER_TRANSFORMER
-
-
-@dataclass
 class SarathiSchedulerConfig(BaseReplicaSchedulerConfig):
     chunk_size: int = field(
         default=512,
         metadata={"help": "Chunk size for Sarathi."},
+    )
+    max_tokens_in_batch: int = field(
+        default=16384,
+        metadata={"help": "Maximum tokens in batch for vLLM."},
     )
 
     @staticmethod
@@ -723,7 +695,7 @@ class ClusterConfig:
         metadata={"help": "Hybrid replica scheduler config."},
     )
     global_scheduler_config: BaseGlobalSchedulerConfig = field(
-        default_factory=RoundRobinGlobalSchedulerConfig,
+        default_factory=LORGlobalSchedulerConfig,
         metadata={"help": "Global scheduler config."},
     )
     
@@ -801,5 +773,8 @@ class SimulationConfig(ABC):
 
     def write_config_to_file(self):
         config_dict = dataclass_to_dict(self)
-        with open(f"{self.metrics_config.output_dir}/config.json", "w") as f:
-            json.dump(config_dict, f, indent=4)
+        if not os.path.exists(self.metrics_config.output_dir):
+            logger.warning(f"Output directory {self.metrics_config.output_dir} does not exist.")
+        else:
+            with open(f"{self.metrics_config.output_dir}/config.json", "w") as f:
+                json.dump(config_dict, f, indent=4)

@@ -27,19 +27,26 @@ class SarathiReplicaScheduler(BaseReplicaScheduler):
             super().add_request(request)
 
     def _get_request_next_num_tokens(
-        self, request: Request, batch_contains_prefill: bool, num_batch_tokens: int
+        self, request: Request, batch_contains_decode: bool, num_batch_tokens: int
     ) -> int:
         assert not request.completed
 
         if request.is_prefill_complete:
             return 1
-
-        next_num_tokens = min(
-            request.num_prefill_tokens - request.num_processed_tokens,
-            self._config.chunk_size - num_batch_tokens,
-        )
-
-        next_num_tokens = max(0, next_num_tokens)
+        
+        # NOTE: If batch contains decode, we use chunked prefill
+        if batch_contains_decode:
+            next_num_tokens = min(
+                request.num_prefill_tokens - request.num_processed_tokens,
+                self._config.chunk_size - num_batch_tokens,
+            )
+            next_num_tokens = max(0, next_num_tokens)
+        else:
+            # Otherwise, we prefill as much as possible (up to max tokens in batch)
+            next_num_tokens = min(
+                request.num_prefill_tokens - request.num_processed_tokens,
+                self._config.max_tokens_in_batch - num_batch_tokens,
+            )
 
         return next_num_tokens
 
@@ -48,7 +55,7 @@ class SarathiReplicaScheduler(BaseReplicaScheduler):
         num_tokens = []
         skipped_requests = []
         running_prefills = []
-        contains_prefill = False
+        contains_decode = False
         num_batch_tokens = 0
 
         # preempted requests could contain multiple requests which have
@@ -64,7 +71,7 @@ class SarathiReplicaScheduler(BaseReplicaScheduler):
                 continue
 
             next_num_tokens = self._get_request_next_num_tokens(
-                request, contains_prefill, num_batch_tokens
+                request, contains_decode, num_batch_tokens
             )
 
             if next_num_tokens == 0:
@@ -87,6 +94,7 @@ class SarathiReplicaScheduler(BaseReplicaScheduler):
             else:
                 self._allocate_request(request)
                 assert request.is_prefill_complete
+                contains_decode = True
                 num_batch_tokens += next_num_tokens
                 requests.append(request)
                 num_tokens.append(next_num_tokens)
@@ -95,14 +103,13 @@ class SarathiReplicaScheduler(BaseReplicaScheduler):
             assert not request.is_prefill_complete
 
             next_num_tokens = self._get_request_next_num_tokens(
-                request, contains_prefill, num_batch_tokens
+                request, contains_decode, num_batch_tokens
             )
 
             if next_num_tokens == 0:
                 skipped_requests.append(request)
                 continue
 
-            contains_prefill = True
             num_batch_tokens += next_num_tokens
             requests.append(request)
             num_tokens.append(next_num_tokens)
@@ -126,7 +133,7 @@ class SarathiReplicaScheduler(BaseReplicaScheduler):
                 break
 
             next_num_tokens = self._get_request_next_num_tokens(
-                self._request_queue[0], contains_prefill, num_batch_tokens
+                self._request_queue[0], contains_decode, num_batch_tokens
             )
 
             if next_num_tokens == 0:
@@ -136,8 +143,7 @@ class SarathiReplicaScheduler(BaseReplicaScheduler):
 
             self._allocate_request(request)
 
-            # all new requests will have a prefill
-            contains_prefill = True
+            # all new requests will be prefill requests
             num_batch_tokens += next_num_tokens
             requests.append(request)
             num_tokens.append(next_num_tokens)

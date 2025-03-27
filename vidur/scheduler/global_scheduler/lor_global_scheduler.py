@@ -19,7 +19,7 @@ class LORGlobalScheduler(BaseGlobalScheduler):
         # keep a map of replica_id -> replica_scheduler
         # this is used to find the replica with the least outstanding requests
         pending_requests_map = {
-            replica_scheduler.replica_id: replica_scheduler.num_pending_requests
+            replica_scheduler.replica_id: replica_scheduler.num_pending_requests + replica_scheduler.num_allocated_requests
             for replica_scheduler in self._replica_schedulers.values()
         }
 

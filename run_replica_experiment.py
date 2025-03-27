@@ -7,6 +7,7 @@ import glob
 import argparse
 import multiprocessing
 import sys
+import functools
 
 from vidur.config.config import TraceRequestLengthGeneratorConfig
 
@@ -38,12 +39,13 @@ def run_simulation(
     hybrid_replicas,
     chunk_size,
     output_dir,
-    length_generator_type,
-    qps,
     log_file,
+    **kwargs
 ):
     """Run a single simulation with the specified replica configuration."""
     total_replicas = prefill_replicas + decode_replicas + hybrid_replicas
+    length_generator_type = kwargs["request_length_generator_type"]
+    qps = kwargs["qps"]
 
     # Redirect stdout/stderr to log file during simulation
     with Redirect(log_file) as _:
@@ -51,7 +53,6 @@ def run_simulation(
             DistributionShiftRequestLengthGeneratorConfig,
             FixedRequestLengthGeneratorConfig,
             SyntheticRequestGeneratorConfig,
-            UniformRequestLengthGeneratorConfig,
             PoissonRequestIntervalGeneratorConfig,
             ClusterConfig,
             MetricsConfig,
@@ -62,28 +63,15 @@ def run_simulation(
 
         request_length_generator_config = None
         if length_generator_type == "fixed":
-            request_length_generator_config = FixedRequestLengthGeneratorConfig()
-        elif length_generator_type == "uniform":
-            request_length_generator_config = UniformRequestLengthGeneratorConfig()
+            prefill_length = kwargs["prefill_length"]
+            decode_length = kwargs["decode_length"]
+            assert prefill_length is not None and decode_length is not None
+            request_length_generator_config = FixedRequestLengthGeneratorConfig(
+                prefill_tokens=prefill_length, decode_tokens=decode_length
+            )
         elif length_generator_type == "shift":
             request_length_generator_config = (
                 DistributionShiftRequestLengthGeneratorConfig()
-            )
-        elif length_generator_type == "trace_prefill_heavy":
-            request_length_generator_config = (
-                TraceRequestLengthGeneratorConfig(
-                    trace_file="data/processed_traces/splitwise_conv.csv",
-                    prefill_scale_factor=4.0,
-                    decode_scale_factor=0.5,
-                )
-            )
-        elif length_generator_type == "trace_decode_heavy":
-            request_length_generator_config = (
-                TraceRequestLengthGeneratorConfig(
-                    trace_file="data/processed_traces/openr1_openthoughts_114k_code.csv",
-                    prefill_scale_factor=1.0,
-                    decode_scale_factor=0.5,
-                )
             )
         else:
             assert (
@@ -166,6 +154,95 @@ def calculate_median_metric(df, metric_name):
     # Find the row where CDF is closest to 0.5 (median)
     median_idx = (df["cdf"] - 0.5).abs().idxmin()
     return df.loc[median_idx, metric_name]
+
+
+def calculate_throughput(output_dir):
+    """
+    Calculate throughput based on request completion times.
+    Throughput = Number of requests / Total time
+    """
+    csv_file = f"{output_dir}/plots/request_completion_time_series.csv"
+    
+    if not os.path.exists(csv_file):
+        print(f"Request completion time series file not found: {csv_file}")
+        return None
+    
+    df = pd.read_csv(csv_file)
+    if "Time (sec)" not in df.columns:
+        print(f"Time column not found in {csv_file}")
+        return None
+    
+    # Get the total number of requests and maximum completion time
+    num_requests = len(df)
+    max_time = df["Time (sec)"].max()
+    
+    # Calculate throughput (requests per second)
+    if max_time > 0:
+        throughput = num_requests / max_time
+        return throughput
+    else:
+        return 0
+
+
+def plot_throughput_bar_chart(throughput_data, output_dir):
+    """
+    Plot a bar chart of throughputs for different configurations.
+    """
+    if not throughput_data:
+        print("No throughput data to plot")
+        return
+    
+    plt.figure(figsize=(14, 8))
+    
+    # Extract labels and throughput values
+    labels = list(throughput_data.keys())
+    values = list(throughput_data.values())
+    
+    # Sort by throughput (highest first)
+    sorted_indices = np.argsort(values)[::-1]
+    sorted_labels = [labels[i] for i in sorted_indices]
+    sorted_values = [values[i] for i in sorted_indices]
+    
+    # Separate configurations by type for coloring
+    pure_disagg_indices = [i for i, label in enumerate(sorted_labels) if "Hybrid" not in label]
+    pure_hybrid_indices = [i for i, label in enumerate(sorted_labels) if "Hybrid only" in label]
+    one_hybrid_indices = [i for i, label in enumerate(sorted_labels) if "1 Hybrid" in label]
+    
+    # Create bar chart
+    bars = plt.bar(range(len(sorted_labels)), sorted_values, color='lightgray')
+    
+    # Color bars based on configuration type
+    for i in pure_disagg_indices:
+        bars[i].set_color('royalblue')
+    for i in pure_hybrid_indices:
+        bars[i].set_color('crimson')
+    for i in one_hybrid_indices:
+        bars[i].set_color('forestgreen')
+    
+    # Add value labels on top of bars
+    for i, v in enumerate(sorted_values):
+        plt.text(i, v + max(sorted_values) * 0.01, f"{v:.2f}", ha='center')
+    
+    plt.xlabel('Configuration')
+    plt.ylabel('Throughput (requests/second)')
+    plt.title('Throughput Comparison for Different Replica Configurations')
+    
+    # Handle x-axis labels
+    plt.xticks(range(len(sorted_labels)), sorted_labels, rotation=45, ha='right')
+    
+    # Add a legend
+    from matplotlib.patches import Patch
+    legend_elements = [
+        Patch(facecolor='royalblue', label='Pure Disaggregated'),
+        Patch(facecolor='crimson', label='Pure Hybrid'),
+        Patch(facecolor='forestgreen', label='Mixed Hybrid')
+    ]
+    plt.legend(handles=legend_elements)
+    
+    plt.tight_layout()
+    plt.grid(axis='y', linestyle='--', alpha=0.7)
+    plt.savefig(f"{output_dir}/throughput_comparison.png", dpi=300)
+    plt.close()
 
 
 def plot_cdfs(
@@ -289,47 +366,68 @@ def plot_cdfs(
                 medians[label] = calculate_median_metric(df, metric_name)
 
         # Separate hybrid from non-hybrid configurations
-        hybrid_labels = [label for label in cdf_data_dict.keys() if "Hybrid" in label]
-        non_hybrid_labels = [
-            label for label in cdf_data_dict.keys() if "Hybrid" not in label
-        ]
+        pure_disagg_labels = [label for label in cdf_data_dict.keys() if "Hybrid" not in label]
+        pure_hybrid_labels = [label for label in cdf_data_dict.keys() if "Hybrid only" in label]
+        one_hybrid_labels = [label for label in cdf_data_dict.keys() if "1 Hybrid" in label]
 
         # Sort non-hybrid configurations by median and take top 5
-        sorted_non_hybrid = sorted(
-            non_hybrid_labels, key=lambda label: medians.get(label, float("inf"))
+        sorted_pure_disagg_labels = sorted(
+            pure_disagg_labels, key=lambda label: medians.get(label, float("inf"))
         )
-        top_5_non_hybrid = sorted_non_hybrid[:5]
+        top_5_pure_disagg = sorted_pure_disagg_labels[:5]
 
         # Sort hybrid configurations by median and take top 3
-        sorted_hybrid = sorted(
-            hybrid_labels, key=lambda label: medians.get(label, float("inf"))
+        sorted_pure_hybrid_labels = sorted(
+            pure_hybrid_labels, key=lambda label: medians.get(label, float("inf"))
         )
-        top_3_hybrid = sorted_hybrid[:3]
+        top_5_pure_hybrid = sorted_pure_hybrid_labels[:5]
 
-        # Generate blue shades for non-hybrid configs
-        blue_shades = plt.cm.Blues(np.linspace(0.5, 0.9, len(top_5_non_hybrid)))
+        sorted_one_hybrid_labels = sorted(
+            one_hybrid_labels, key=lambda label: medians.get(label, float("inf"))
+        )
+        top_5_one_hybrid = sorted_one_hybrid_labels[:5]
+
+        # Generate consistent color schemes for all configurations
+        blue_color_map = plt.cm.Blues(np.linspace(0.5, 0.9, max(len(pure_disagg_labels), 1)))
+        red_color_map = plt.cm.Reds(np.linspace(0.5, 0.9, max(len(pure_hybrid_labels), 1)))
+        green_color_map = plt.cm.Greens(np.linspace(0.5, 0.9, max(len(one_hybrid_labels), 1)))
+        
+        # Create color dictionaries for consistent colors
+        pure_disagg_colors = {label: blue_color_map[i] for i, label in enumerate(pure_disagg_labels)}
+        pure_hybrid_colors = {label: red_color_map[i] for i, label in enumerate(pure_hybrid_labels)}
+        one_hybrid_colors = {label: green_color_map[i] for i, label in enumerate(one_hybrid_labels)}
 
         # Plot top 5 non-hybrid configurations in blue shades
-        for i, label in enumerate(top_5_non_hybrid):
+        for label in top_5_pure_disagg:
             df = cdf_data_dict[label]
             if df is not None:
                 plt.plot(
                     df[metric_name],
                     df["cdf"],
                     label=f"{label} (median: {medians[label]:.3f}s)",
-                    color=blue_shades[i],
+                    color=pure_disagg_colors[label],
                 )
 
         # Plot hybrid configurations in different shades of red (only top 3)
-        red_shades = plt.cm.Reds(np.linspace(0.5, 0.9, len(top_3_hybrid)))
-        for i, label in enumerate(top_3_hybrid):
+        for label in top_5_pure_hybrid:
             df = cdf_data_dict[label]
             if df is not None:
                 plt.plot(
                     df[metric_name],
                     df["cdf"],
                     label=f"{label} (median: {medians[label]:.3f}s)",
-                    color=red_shades[i],
+                    color=pure_hybrid_colors[label],
+                    linewidth=2.5,
+                )
+            
+        for label in top_5_one_hybrid:
+            df = cdf_data_dict[label]
+            if df is not None:
+                plt.plot(
+                    df[metric_name],
+                    df["cdf"],
+                    label=f"{label} (median: {medians[label]:.3f}s)",
+                    color=one_hybrid_colors[label],
                     linewidth=2.5,
                 )
 
@@ -346,11 +444,13 @@ def plot_cdfs(
         plt.close()
 
 
-def run_experiment_worker(config_tuple):
+def run_experiment_worker(config_tuple, **kwargs):
     """Worker function to run a single experiment configuration."""
-    prefill, decode, hybrid, chunk_size, base_output_dir, request_length_generator_type, qps = (
+    prefill, decode, hybrid, chunk_size = (
         config_tuple
     )
+
+    base_output_dir = kwargs["base_output_dir"]
 
     # Create subdirectory for this configuration
     config_dir = f"{base_output_dir}/prefill_{prefill}_decode_{decode}_hybrid_{hybrid}_chunk_size_{chunk_size}"
@@ -361,19 +461,24 @@ def run_experiment_worker(config_tuple):
 
     # Run simulation
     output_dir = run_simulation(
-        prefill, decode, hybrid, chunk_size, config_dir, request_length_generator_type, qps, log_file
+        prefill, decode, hybrid, chunk_size, config_dir, log_file, **kwargs
     )
 
-    # Return configuration label and output directory for metric extraction
+    # Return configuration label, output directory, and throughput for metric extraction
     if output_dir:
-        if hybrid > 0:
+        if hybrid > 0 and prefill == 0 and decode == 0:
             label = f"Hybrid only ({hybrid}) - chunk size {chunk_size}"
-        else:
+        elif prefill > 0 and decode > 0 and hybrid == 0:
             label = f"Prefill: {prefill}, Decode: {decode}"
+        elif hybrid > 0:
+            label = f"1 Hybrid, Prefill: {prefill}, Decode: {decode} - chunk size {chunk_size}"
 
-        return label, output_dir
+        # Calculate throughput
+        throughput = calculate_throughput(output_dir)
+        
+        return label, output_dir, throughput
 
-    return None, None
+    return None, None, None
 
 
 def parse_args():
@@ -391,25 +496,35 @@ def parse_args():
         "--hybrid_chunked_prefill_sizes",
         nargs="+",
         type=int,
-        default=[32, 64, 128, 256, 512, 1024, 2048, 4096],
-        help="Chunked prefill sizes for hybrid configurations (default: [32, 64, 128, 256, 512, 1024, 2048, 4096])",
+        default=[128, 512, 2048],
+        help="Chunked prefill sizes for hybrid configurations (default: [128, 512, 2048])",
     )
     parser.add_argument(
         "--num_workers",
         type=int,
-        default=None,
+        default=4,
         help="Number of parallel workers (default: number of CPU cores)",
     )
     parser.add_argument(
         "--request_length_generator_type",
         type=str,
-        default="trace_decode_heavy",
-        choices=["fixed", "uniform", "shift", "trace_prefill_heavy", "trace_decode_heavy"],
+        default="fixed",
+        choices=["fixed", "uniform", "shift", "trace_prefill_heavy", "trace_balanced", "trace_decode_heavy"],
     )
     parser.add_argument(
         "--qps_to_num_replica_ratio",
         type=float,
         help="QPS to number of replicas ratio (should be 0.5 for decode heavy, 2.0 for everything else)",
+    )
+    parser.add_argument(
+        "--prefill_length",
+        type=int,
+        required=False
+    )
+    parser.add_argument(
+        "--decode_length",
+        type=int,
+        required=False
     )
     parser.add_argument(
         "--metrics",
@@ -448,9 +563,6 @@ def main():
             total_replicas - num_prefill,
             0,
             -1,
-            base_output_dir,
-            request_length_generator_type,
-            int(args.qps_to_num_replica_ratio * total_replicas),
         )
         for num_prefill in range(1, total_replicas)
     ] + [
@@ -459,26 +571,49 @@ def main():
             0,
             total_replicas,
             chunked_prefill_size,
-            base_output_dir,
-            request_length_generator_type,
-            int(args.qps_to_num_replica_ratio * total_replicas),
         )
         for chunked_prefill_size in args.hybrid_chunked_prefill_sizes
+    ] + [  
+        (
+            num_prefill,
+            total_replicas - num_prefill - 1,
+            1,
+            512,
+        )
+        for num_prefill in range(1, total_replicas - 1)
     ]
+
 
     # Initialize data structure for all metrics
     all_metrics_data = {metric: {} for metric in args.metrics}
+    throughput_data = {}  # Dictionary to store throughput for each configuration
 
     results = []
+    other_kwargs = {
+        "base_output_dir": base_output_dir,
+        "request_length_generator_type": request_length_generator_type,
+        "qps": int(args.qps_to_num_replica_ratio * total_replicas),
+        "prefill_length": args.prefill_length,
+        "decode_length": args.decode_length,
+    }
 
-    def run(selected_configs):
+    def run(selected_configs, **kwargs):
+        # Create a worker function with kwargs pre-applied
+        worker_with_kwargs = functools.partial(run_experiment_worker, **kwargs)
+        
         # Map the worker function to the configurations
-        curr_results = pool.map(run_experiment_worker, selected_configs)
-        results.extend(curr_results)
-
-        # Extract metrics for each configuration
-        for label, output_dir in curr_results:
+        curr_results = pool.map(worker_with_kwargs, selected_configs)
+        
+        # Extract metrics and throughput for each configuration
+        for label, output_dir, throughput in curr_results:
             if label is not None and output_dir is not None:
+                # Store the label and output_dir for later use
+                results.append((label, output_dir))
+                
+                # Store throughput data if available
+                if throughput is not None:
+                    throughput_data[label] = throughput
+                
                 for metric in args.metrics:
                     if request_length_generator_type != "shift":
                         cdf = extract_metric_cdf(output_dir, metric)
@@ -487,11 +622,11 @@ def main():
 
     if args.num_workers is None:
         with multiprocessing.Pool(processes=args.num_workers) as pool:
-            run(configs)
+            run(configs, **other_kwargs)
     else:
         for i in range((len(configs) + args.num_workers - 1) // args.num_workers):
             with multiprocessing.Pool(processes=args.num_workers) as pool:
-                run(configs[i * args.num_workers : (i + 1) * args.num_workers])
+                run(configs[i * args.num_workers : (i + 1) * args.num_workers], **other_kwargs)
 
     # Plot comparison of CDFs for each metric
     for metric in args.metrics:
@@ -503,6 +638,10 @@ def main():
                 request_length_generator_type,
                 results
             )
+    
+    # Plot throughput bar chart if throughput data was collected
+    if throughput_data:
+        plot_throughput_bar_chart(throughput_data, base_output_dir)
 
     print(f"Experiment complete. Results saved in {base_output_dir}")
 
